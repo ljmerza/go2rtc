@@ -5,6 +5,17 @@ import (
 	"testing"
 )
 
+func TestCompressFragmentRanges(t *testing.T) {
+	asm := &channelAsm{curAUTotal: 8, receivedData: map[uint16]struct{}{0: {}, 2: {}, 6: {}}}
+	missing, received := missingFragmentRanges(asm, true)
+	if got, want := compressFragmentRanges(missing), "1,3-5"; got != want {
+		t.Fatalf("missing ranges=%q, want %q", got, want)
+	}
+	if received != 4 { // three data fragments plus trailer
+		t.Fatalf("received=%d, want 4", received)
+	}
+}
+
 // ---------- wrapSeq.extend wrap-around ---------------------------------
 
 // TestWrapSeqExtendForwardSmall — simple forward step within the same
@@ -251,6 +262,19 @@ type fragSpec struct {
 	payload    []byte // bytes from inner[36:]
 }
 
+type extendedFragSpec struct {
+	b1            byte
+	channel       byte
+	subFlag       byte
+	subWire       uint16
+	totalFrags    uint16
+	fragIdx       uint16
+	frameNum      uint32
+	nextFrameLike uint32
+	payload       []byte
+	extra         []byte
+}
+
 // makePkt synthesises the post-decryption packet bytes parseDatagram
 // expects: a 0x1C-byte outer header followed by an inner of length
 // 36 + len(payload).  Only the offsets actually read are populated.
@@ -266,6 +290,28 @@ func makePkt(f fragSpec) []byte {
 	binary.LittleEndian.PutUint16(inner[24:], f.paylen)
 	binary.LittleEndian.PutUint32(inner[28:], f.frameNum)
 	copy(inner[36:], f.payload)
+
+	pkt := make([]byte, 0x1C+len(inner))
+	pkt[3] = flagsRecv
+	binary.LittleEndian.PutUint16(pkt[8:], msgSessionD2C)
+	copy(pkt[0x1C:], inner)
+	return pkt
+}
+
+func makeExtendedPkt(f extendedFragSpec) []byte {
+	inner := make([]byte, 44+len(f.payload)+len(f.extra))
+	inner[0] = 0x0c
+	inner[1] = f.b1
+	inner[24] = f.channel
+	inner[25] = f.subFlag
+	binary.LittleEndian.PutUint16(inner[26:28], f.subWire)
+	binary.LittleEndian.PutUint16(inner[28:30], f.totalFrags)
+	binary.LittleEndian.PutUint16(inner[30:32], f.fragIdx)
+	binary.LittleEndian.PutUint16(inner[32:34], uint16(len(f.payload)))
+	binary.LittleEndian.PutUint32(inner[36:40], f.frameNum)
+	binary.LittleEndian.PutUint32(inner[40:44], f.nextFrameLike)
+	copy(inner[44:], f.payload)
+	copy(inner[44+len(f.payload):], f.extra)
 
 	pkt := make([]byte, 0x1C+len(inner))
 	pkt[3] = flagsRecv
@@ -293,6 +339,7 @@ func newTestClient(firstSubWire uint16, quality string) *Client {
 	c.avNextExt = c.wrap.ext
 	c.avHighExt = c.wrap.ext - 1
 	c.avPrevSubWire = uint16(c.wrap.ext - 1)
+	c.initACKTracking(c.wrap.ext - 1)
 	return c
 }
 
@@ -318,6 +365,123 @@ func dataFragPayload(seed byte, n int) []byte {
 		out[i] = seed + byte(i%19)
 	}
 	return out
+}
+
+func TestExtendedMediaHeaderAssemblyAndACK(t *testing.T) {
+	c := newTestClient(0x4000, "hd")
+
+	mainData := []byte{0, 0, 0, 1, 0x65, 0x88, 0x99}
+	mainEnd := makeTrailerPayload([]byte{0xaa, 0xbb}, true, 0x01, 1000)
+	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
+		b1: 0x08, channel: innerChMain, subFlag: 0,
+		subWire: 0x4000, totalFrags: 2, fragIdx: 0,
+		frameNum: 10, nextFrameLike: 11, payload: mainData,
+	}))
+	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
+		b1: 0x09, channel: innerChMain, subFlag: 1,
+		subWire: 0x4001, totalFrags: 2, fragIdx: 16,
+		frameNum: 10, nextFrameLike: 11, payload: mainEnd,
+	}))
+
+	subData := []byte{0, 0, 0, 1, 0x41, 0x44}
+	subEnd := makeTrailerPayload([]byte{0xcc}, false, 0x01, 1040)
+	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
+		b1: 0x0c, channel: innerChSub, subFlag: 0,
+		subWire: 0x4002, totalFrags: 2, fragIdx: 0,
+		frameNum: 11, nextFrameLike: 12, payload: subData,
+	}))
+	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
+		b1: 0x0d, channel: innerChSub, subFlag: 1,
+		subWire: 0x4003, totalFrags: 2, fragIdx: 16,
+		frameNum: 11, nextFrameLike: 12, payload: subEnd,
+	}))
+
+	packets := drainAll(c)
+	if len(packets) != 2 {
+		t.Fatalf("emitted %d packets, want one main and one sub AU", len(packets))
+	}
+	if !packets[0].IsKeyframe || packets[1].IsKeyframe {
+		t.Fatalf("unexpected keyframe flags: first=%t second=%t", packets[0].IsKeyframe, packets[1].IsKeyframe)
+	}
+	if got := c.stats.extendedMediaParsed.Load(); got != 4 {
+		t.Fatalf("extendedMediaParsed=%d, want 4", got)
+	}
+	if got := c.stats.extendedMediaDataPackets.Load(); got != 2 {
+		t.Fatalf("extendedMediaDataPackets=%d, want 2", got)
+	}
+	if got := c.stats.extendedMediaEndPackets.Load(); got != 2 {
+		t.Fatalf("extendedMediaEndPackets=%d, want 2", got)
+	}
+	if got := c.stats.extendedMediaRarePackets.Load(); got != 2 {
+		t.Fatalf("extendedMediaRarePackets=%d, want 2", got)
+	}
+	if got := c.stats.sequenceSeenAndAssembled.Load(); got != 4 {
+		t.Fatalf("sequenceSeenAndAssembled=%d, want 4", got)
+	}
+	if got := c.contiguousAckExt(); got != 0x4003 {
+		t.Fatalf("ACK watermark=0x%x, want 0x4003", got)
+	}
+	if got := c.stats.ackSeenPending.Load(); got != 0 {
+		t.Fatalf("ACK pending=%d, want 0", got)
+	}
+	if got := c.stats.missingFragmentsTotal.Load(); got != 0 {
+		t.Fatalf("missingFragmentsTotal=%d, want 0", got)
+	}
+}
+
+func TestExtendedMediaRejectDoesNotACK(t *testing.T) {
+	c := newTestClient(0x4000, "hd")
+
+	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
+		b1: 0x08, channel: innerChMain, subFlag: 0,
+		subWire: 0x4000, totalFrags: 2, fragIdx: 0,
+		frameNum: 10, nextFrameLike: 99, payload: []byte{1, 2, 3},
+	}))
+	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
+		b1: 0x0d, channel: innerChSub, subFlag: 1,
+		subWire: 0x4001, totalFrags: 1, fragIdx: 16,
+		frameNum: 11, nextFrameLike: 12, payload: []byte{1, 2, 3},
+	}))
+
+	if got := c.stats.extendedMediaCandidates.Load(); got != 2 {
+		t.Fatalf("extendedMediaCandidates=%d, want 2", got)
+	}
+	if got := c.stats.extendedMediaRejected.Load(); got != 2 {
+		t.Fatalf("extendedMediaRejected=%d, want 2", got)
+	}
+	if got := c.stats.unknown0c08Remaining.Load(); got != 1 {
+		t.Fatalf("unknown0c08Remaining=%d, want 1", got)
+	}
+	if got := c.stats.unknown0c0dRemaining.Load(); got != 1 {
+		t.Fatalf("unknown0c0dRemaining=%d, want 1", got)
+	}
+	if got := c.stats.sequenceSeenButUnhandled.Load(); got != 2 {
+		t.Fatalf("sequenceSeenButUnhandled=%d, want 2", got)
+	}
+	if got := c.contiguousAckExt(); got != 0x3fff {
+		t.Fatalf("rejected packet advanced ACK watermark to 0x%x", got)
+	}
+}
+
+func TestNormalAudio0c0dIsNotExtended(t *testing.T) {
+	c := newTestClient(0x4000, "hd")
+	payload := append(make([]byte, 8), []byte{0xff, 0xf1, 0x50, 0x80, 0, 0, 0}...)
+	c.parseDatagram(makePkt(fragSpec{
+		channel: innerChSub, sub17: 0, b1: 0x0d,
+		subWire: 0x4000, totalFrags: 1, fragIdx: 0,
+		paylen: uint16(len(payload)), frameNum: 1, payload: payload,
+	}))
+
+	packets := drainAll(c)
+	if len(packets) != 1 || packets[0].Codec != CodecAACADTS {
+		t.Fatalf("normal-layout 0c0d audio packets=%+v", packets)
+	}
+	if got := c.stats.normalMediaPackets.Load(); got != 1 {
+		t.Fatalf("normalMediaPackets=%d, want 1", got)
+	}
+	if got := c.stats.extendedMediaCandidates.Load(); got != 0 {
+		t.Fatalf("extendedMediaCandidates=%d, want 0 for normal AAC", got)
+	}
 }
 
 // TestEndToEndMultiFragmentIDR walks an IDR frame split across 4 data
@@ -569,6 +733,81 @@ func TestDualStreamFilterSubSingleFragment(t *testing.T) {
 	if string(pkts[0].Payload) != string(want) {
 		t.Fatalf("payload=%x, want %x (HD P-frame slice bytes)", pkts[0].Payload, want)
 	}
+	if got := c.stats.wrongStreamDrop.Load(); got != 1 {
+		t.Fatalf("wrongStreamDrop=%d, want 1", got)
+	}
+}
+
+func TestForceDrainReasonCountersAndWindow(t *testing.T) {
+	c := newTestClient(0x4000, "hd")
+	c.avHighExt = 0x4009
+	c.avBuffer[0x4001] = &pendingFrag{channel: 0xff, subExt: 0x4001}
+	c.avBuffer[0x4002] = &pendingFrag{channel: 0xff, subExt: 0x4002}
+
+	c.forceDrain()
+
+	if got := c.stats.forceDrainFlush.Load(); got != 1 {
+		t.Fatalf("forceDrainFlush=%d, want 1", got)
+	}
+	if got := c.stats.forceDrainEntries.Load(); got != 1 {
+		t.Fatalf("forceDrainEntries=%d, want 1", got)
+	}
+	if _, ok := c.avBuffer[0x4002]; !ok {
+		t.Fatal("entry inside the eight-packet reorder window was flushed")
+	}
+}
+
+func TestForceDrainDoesNotAdvanceACKWatermark(t *testing.T) {
+	c := newTestClient(0x4000, "hd")
+	send := func(subWire uint16, frameNum uint32) {
+		c.parseDatagram(makePkt(fragSpec{
+			channel: innerChMain, b1: 0x00,
+			subWire: subWire, totalFrags: 1, fragIdx: 0,
+			paylen: 8, frameNum: frameNum, payload: dataFragPayload(byte(frameNum), 8),
+		}))
+	}
+
+	send(0x4000, 1)
+	send(0x4002, 2) // leave 0x4001 missing
+	if got := c.contiguousAckExt(); got != 0x4000 {
+		t.Fatalf("ACK watermark after gap=0x%x, want 0x4000", got)
+	}
+	if got := c.stats.ackSeenPending.Load(); got != 1 {
+		t.Fatalf("ackSeenPending=%d, want 1", got)
+	}
+
+	// The first call observes a new high-water value; five more calls
+	// reach the stall threshold and flush the buffered 0x4002 entry.
+	for range forceDrainStallTicks + 1 {
+		c.forceDrain()
+	}
+	if got := c.avNextExt; got != 0x4003 {
+		t.Fatalf("assembler cursor after forceDrain=0x%x, want 0x4003", got)
+	}
+	if got := c.contiguousAckExt(); got != 0x4000 {
+		t.Fatalf("forceDrain advanced ACK watermark to 0x%x, want 0x4000", got)
+	}
+
+	// A retransmission can close the ACK gap even though the assembler
+	// cursor has already moved past it and will classify it as deferred.
+	send(0x4001, 3)
+	if got := c.contiguousAckExt(); got != 0x4002 {
+		t.Fatalf("ACK watermark after retransmit=0x%x, want 0x4002", got)
+	}
+	if got := c.stats.ackSeenPending.Load(); got != 0 {
+		t.Fatalf("ackSeenPending after retransmit=%d, want 0", got)
+	}
+	if got := c.stats.ackAdvanced.Load(); got != 3 {
+		t.Fatalf("ackAdvanced=%d, want 3", got)
+	}
+	if got := c.stats.deferredDrop.Load(); got != 1 {
+		t.Fatalf("deferredDrop=%d, want 1", got)
+	}
+
+	send(0x4001, 3)
+	if got := c.stats.ackDuplicateOrOld.Load(); got != 1 {
+		t.Fatalf("ackDuplicateOrOld=%d, want 1", got)
+	}
 }
 
 // TestChannelAsmInterleavedMainAndSub — ch=0x05 IDR and ch=0x07 P-frame
@@ -671,6 +910,9 @@ func TestFragIdxGapDetection(t *testing.T) {
 
 	if c.stats.fragSkips.Load() == 0 {
 		t.Errorf("fragSkips=0; gap from frag 0→2 should have been counted")
+	}
+	if c.stats.fragIdxGap.Load() == 0 {
+		t.Errorf("fragIdxGap=0; gap from frag 0→2 should have been classified")
 	}
 	if c.stats.fragsLost.Load() == 0 {
 		t.Errorf("fragsLost=0; at least one lost fragment expected")

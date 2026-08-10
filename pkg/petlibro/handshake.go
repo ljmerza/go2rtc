@@ -101,9 +101,11 @@ func (c *Client) handshake() error {
 	seedBytes[0] &= 0xFE
 	seed := binary.LittleEndian.Uint32(seedBytes[:])
 	loginA, loginB := buildLoginPair(seed)
+	c.dumpC2DInner(loginA)
 	if err := c.send(buildOuter(c.nonce, 0, loginA, 0x00, 0x00, flagsSession)); err != nil {
 		return err
 	}
+	c.dumpC2DInner(loginB)
 	if err := c.send(buildOuter(c.nonce, 1, loginB, 0x00, 0x00, flagsSession)); err != nil {
 		return err
 	}

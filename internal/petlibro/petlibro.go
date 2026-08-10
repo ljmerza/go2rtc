@@ -12,12 +12,11 @@
 // back-label or visible in the Petlibro app under camera details.  If
 // the URL omits the host, go2rtc discovers the local camera IP by UID.
 //
-// HD/SD-sticky caveat: the `quality=hd|sd` query parameter SELECTS
-// which already-enabled stream the camera should emit, it does NOT
-// turn streams on.  HD/SD-on/off is persisted in the Petlibro cloud
-// config (set via the Petlibro phone app) and survives reboots; if a
-// camera was set to "HD only" via the app, `?quality=sd` will get you
-// nothing.  See internal/petlibro/README.md for the full table.
+// The `quality=hd|sd` query parameter selects the corresponding
+// stream-control body and filters the media frames emitted by the
+// camera. HD sessions may begin with a low-resolution SPS before the
+// camera switches profiles; `hd_probe_wait_ms` can provide a bounded
+// probe-stabilization window. See internal/petlibro/README.md.
 package petlibro
 
 import (

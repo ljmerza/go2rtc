@@ -47,23 +47,25 @@ const (
 var sdkVersion = []byte{0x00, 0x08, 0x03, 0x04}
 
 // IOCtrl IDs used during the bootstrap sequence (verified against
-// PCAPdroid captures of the official Petlibro Android app).  The
-// 0x03xx "vendor" IDs are camera-specific queries the app sends
-// before starting the stream — names reflect their app-side purpose:
-//   - 0x0322 GET_AUDIO_OUT_FORMAT
-//   - 0x032A GET_FORMAT
-//   - 0x0372 unknown vendor query
+// PCAPdroid captures of the official Petlibro Android app). Names for
+// standard IDs follow TUTK's public AVAPIs.h / AVIOCTRLDEFs.h. The
+// observed Petlibro SETSTREAMCTRL value remains 0x0024 rather than the
+// stock IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ value 0x0320.
 //
 // Removing them from the bootstrap doesn't prevent the stream from
 // starting, but matching the app's sequence avoids edge-case
 // firmware quirks on some camera models.
 const (
-	ioctlSetStreamCtrl uint32 = 0x0024 // SETSTREAMCTRL (qualityHD/qualitySD bodies, byte 0)
-	ioctlVendor0322    uint32 = 0x0322
-	ioctlVendor032A    uint32 = 0x032A
-	ioctlVendor0372    uint32 = 0x0372
-	ioctlStart         uint32 = 0x01FF // IPCAM_START
-	ioctlAudioOn       uint32 = 0x0300 // AUDIO_ENABLE
+	ioctlInnerSendDataDelay   uint32 = 0x00FF // IOTYPE_INNER_SND_DATA_DELAY
+	ioctlPetlibroStreamCtrl   uint32 = 0x0024 // captured Petlibro SETSTREAMCTRL body ID
+	ioctlSetStreamCtrlReq     uint32 = 0x0320 // standard IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ
+	ioctlSetStreamCtrlResp    uint32 = 0x0321
+	ioctlStart                uint32 = 0x01FF // IOTYPE_USER_IPCAM_START
+	ioctlAudioOn              uint32 = 0x0300 // IOTYPE_USER_IPCAM_AUDIOSTART
+	ioctlGetStreamCtrlReq     uint32 = 0x0322 // IOTYPE_USER_IPCAM_GETSTREAMCTRL_REQ
+	ioctlGetStreamCtrlResp    uint32 = 0x0323
+	ioctlGetAudioOutFormatReq uint32 = 0x032A // IOTYPE_USER_IPCAM_GETAUDIOOUTFORMAT_REQ
+	ioctlGetVideoModeReq      uint32 = 0x0372 // IOTYPE_USER_IPCAM_GET_VIDEOMODE_REQ
 )
 
 // SETSTREAMCTRL bodies (12 bytes) — IOCtrl 0x0024 wire payload.
@@ -74,8 +76,8 @@ const (
 // told to enable; the HD/SD on/off state is sticky in the camera's
 // cloud config (set via the Petlibro app), not toggled per-session.
 var (
-	qualityHD = []byte{byte(ioctlSetStreamCtrl), 0, 0, 0, 0x01, 0x00, 0xff, 0x3f, 0, 0, 0, 0}
-	qualitySD = []byte{byte(ioctlSetStreamCtrl), 0, 0, 0, 0x02, 0x00, 0x8a, 0x81, 0, 0, 0, 0}
+	qualityHD = []byte{byte(ioctlPetlibroStreamCtrl), 0, 0, 0, 0x01, 0x00, 0xff, 0x3f, 0, 0, 0, 0}
+	qualitySD = []byte{byte(ioctlPetlibroStreamCtrl), 0, 0, 0, 0x02, 0x00, 0x8a, 0x81, 0, 0, 0, 0}
 )
 
 // Inner-cmd "channel" markers at offset 16..17.
@@ -234,7 +236,11 @@ func innerData(counter, chanHi, subIdx uint16, payload []byte) []byte {
 	return b
 }
 
-// innerAck — sliding-window ACK in AV mode.
+// innerAck — sliding-window ACK in AV mode. avPrev and avCurr name the two
+// sequence fields at bytes 8..9 and 10..11; their complete device-side
+// semantics are still being investigated. Bootstrap sends
+// 0x3FFF/bootstrapAVMax, while steady-state high mode sends
+// lastCurrent/highestObserved.
 //
 //	09 00 0c 00 <cnt:2> 00 00 <av_prev:2> <av_curr:2>
 //	<chan_idx:4>  00 00 <sub:2> <tick16:2>  00 00
@@ -277,11 +283,19 @@ func innerHeartbeat(counter uint16, tick32 uint32) []byte {
 
 // IOCtrl helpers -------------------------------------------------------
 
-// ioctlBody12 builds a 12-byte IOCtrl payload — [u32 ctrlID, 8 zero bytes].
-func ioctlBody12(ctrlID uint32) []byte {
-	b := make([]byte, 12)
+// ioctlBody builds the plaintext carried by innerData for one avSendIOCtrl
+// equivalent: the uint32 IO type followed by its message payload.
+func ioctlBody(ctrlID uint32, payload []byte) []byte {
+	b := make([]byte, 4+len(payload))
 	binary.LittleEndian.PutUint32(b, ctrlID)
+	copy(b[4:], payload)
 	return b
+}
+
+// ioctlBody12 builds an IOCtrl with an 8-byte zero payload. For IPCAM_START
+// this is exactly SMsgAVIoctrlAVStream{channel: 0, reserved: {0,0,0,0}}.
+func ioctlBody12(ctrlID uint32) []byte {
+	return ioctlBody(ctrlID, make([]byte, 8))
 }
 
 // AV-LOGIN wire constants. Verified byte-exact against 36 captured

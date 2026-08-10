@@ -40,8 +40,8 @@ type Producer struct {
 //
 // URL shape (full grammar lives on pkg/petlibro.Dial):
 //
-//	petlibro://<host>?uid=<UID>[&audio=true][&quality=hd|sd][&strict=1][&verbose=1]
-//	petlibro://?uid=<UID>[&subnet=192.168.1.0/24][&audio=true][&quality=hd|sd][&strict=1][&verbose=1]
+//	petlibro://<host>?uid=<UID>[&audio=true][&quality=hd|sd][&ack=<mode>][&ack_interval_ms=25][&ack_repeat_unchanged=1][&send_delay_ctrl=1][&streamctrl_variant=legacy|standard|none][&streamctrl_quality=N][&hd_probe_wait_ms=N][&strict=1][&verbose=1][&trace_ack=1][&trace_frag=1][&trace_frameinfo=1][&trace_packets=1][&dump_plain=<path>][&dump_d2c_plain=<path>][&dump_c2d_plain=<path>]
+//	petlibro://?uid=<UID>[&subnet=192.168.1.0/24][same options as above]
 //
 // strict=1 — pristine-pixels-over-fluency policy: any IDR with a lost
 // fragment is dropped (instead of emitted with localised macroblock
@@ -228,23 +228,63 @@ func avccContainsNALType(avcc []byte, want byte) bool {
 // IDR's full Annex-B AU so the producer can replay it as the first
 // emitted frame, saving consumers up to one full GOP of wait time.
 func probe(client *Client) ([]*core.Media, []byte, uint32, error) {
-	var timedOut atomic.Bool
-	timer := time.AfterFunc(core.ProbeTimeout, func() {
-		timedOut.Store(true)
-		_ = client.Close()
-	})
+	timer := time.NewTimer(core.ProbeTimeout)
 	defer timer.Stop()
 
 	var vcodec, acodec *core.Codec
 	var firstAU []byte
 	var firstTS uint32
-	for {
-		pkt, err := client.ReadPacket()
-		if err != nil {
-			if timedOut.Load() {
-				return nil, nil, 0, fmt.Errorf("petlibro: probe timeout")
+	var selectedWidth, selectedHeight uint16
+	var selectedFrameNum uint32
+	var selectedChannel, selectedOnlineNum byte
+	var waitingForHD bool
+	probeStarted := time.Now()
+
+	resetTimer := func(d time.Duration) {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
 			}
-			return nil, nil, 0, fmt.Errorf("petlibro: probe: %w", err)
+		}
+		timer.Reset(d)
+	}
+	logSelection := func(reason string) {
+		if vcodec == nil {
+			return
+		}
+		buf := annexb.EncodeToAVCC(firstAU)
+		log.Debug().Msgf("petlibro: probe selected resolution=%dx%d reason=%s quality=%q strict=%t firstAU=%d containsSPS=%t containsPPS=%t containsIDR=%t codec=%q fmtp=%q frameNum=%d channel=%d onlineNumOrStreamByte=%d",
+			selectedWidth, selectedHeight, reason, client.quality, client.strict, len(firstAU),
+			avccContainsNALType(buf, h264.NALUTypeSPS),
+			avccContainsNALType(buf, h264.NALUTypePPS),
+			avccContainsNALType(buf, h264.NALUTypeIFrame),
+			vcodec.String(), vcodec.FmtpLine, selectedFrameNum, selectedChannel, selectedOnlineNum)
+	}
+
+probeLoop:
+	for {
+		var pkt *Packet
+		select {
+		case <-timer.C:
+			if waitingForHD && vcodec != nil {
+				waitingForHD = false
+				logSelection("timeout")
+				if acodec != nil || !client.Audio() {
+					break probeLoop
+				}
+				timer.Reset(core.ProbeTimeout)
+				continue
+			}
+			_ = client.Close()
+			return nil, nil, 0, fmt.Errorf("petlibro: probe timeout")
+		case <-client.done:
+			return nil, nil, 0, fmt.Errorf("petlibro: probe: EOF")
+		case p, ok := <-client.frames:
+			if !ok {
+				return nil, nil, 0, fmt.Errorf("petlibro: probe: EOF")
+			}
+			pkt = p
 		}
 		if pkt == nil || len(pkt.Payload) < 5 {
 			continue
@@ -252,18 +292,52 @@ func probe(client *Client) ([]*core.Media, []byte, uint32, error) {
 
 		switch pkt.Codec {
 		case CodecH264:
+			buf := annexb.EncodeToAVCC(pkt.Payload)
+			if !avccContainsNALType(buf, h264.NALUTypeSPS) {
+				continue
+			}
+			codec := h264.AVCCToCodec(buf)
+			if codec == nil {
+				continue
+			}
+			sps := annexbNAL(pkt.Payload, h264.NALUTypeSPS)
+			if len(sps) < 4 {
+				continue
+			}
+			decoded := h264.DecodeSPS(sps)
+			if decoded == nil {
+				continue
+			}
+			width, height := decoded.Width(), decoded.Height()
+
 			if vcodec == nil {
-				buf := annexb.EncodeToAVCC(pkt.Payload)
-				// Scan ALL NAL units in the AU for an SPS — different
-				// firmware versions order them differently (some put
-				// SPS first; bench camera puts AUD/SEI first).
-				// Checking only the first NAL would miss those.
-				if avccContainsNALType(buf, h264.NALUTypeSPS) {
-					vcodec = h264.AVCCToCodec(buf)
-					// Petlibro packs SPS+PPS+IDR into one AU; keep the
-					// Annex-B form so Start() can re-emit it verbatim.
-					firstAU = append([]byte(nil), pkt.Payload...)
+				vcodec = codec
+				firstAU = append([]byte(nil), pkt.Payload...)
+				firstTS = pkt.Timestamp
+				selectedWidth, selectedHeight = width, height
+				selectedFrameNum = pkt.CameraFrameNo
+				selectedChannel = pkt.Channel
+				selectedOnlineNum = pkt.OnlineNumOrStreamByte
+				if client.quality == "hd" && client.hdProbeWait > 0 && (width < 1920 || height < 1080) {
+					waitingForHD = true
+					resetTimer(client.hdProbeWait)
+				} else {
+					logSelection("first_sps")
+				}
+			} else if waitingForHD && (width != selectedWidth || height != selectedHeight) {
+				log.Debug().Msgf("petlibro: spsChange elapsed=%dms old=%dx%d new=%dx%d frameNum=%d channel=%d onlineNumOrStreamByte=%d",
+					time.Since(probeStarted).Milliseconds(), selectedWidth, selectedHeight, width, height,
+					pkt.CameraFrameNo, pkt.Channel, pkt.OnlineNumOrStreamByte)
+				if width > selectedWidth || height > selectedHeight {
+					vcodec = codec
+					firstAU = append(firstAU[:0], pkt.Payload...)
 					firstTS = pkt.Timestamp
+					selectedWidth, selectedHeight = width, height
+					selectedFrameNum = pkt.CameraFrameNo
+					selectedChannel = pkt.Channel
+					selectedOnlineNum = pkt.OnlineNumOrStreamByte
+					waitingForHD = false
+					logSelection("hd_wait_satisfied")
 				}
 			}
 		case CodecAACADTS:
@@ -277,7 +351,7 @@ func probe(client *Client) ([]*core.Media, []byte, uint32, error) {
 			}
 		}
 
-		if vcodec != nil && (acodec != nil || !client.Audio()) {
+		if vcodec != nil && !waitingForHD && (acodec != nil || !client.Audio()) {
 			break
 		}
 	}

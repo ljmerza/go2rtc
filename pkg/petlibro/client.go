@@ -10,7 +10,7 @@
 //	templates.go  — protocol constants + LOGIN templates + frame builders
 //	client.go     — Client struct + Dial + send/recv helpers + public surface
 //	handshake.go  — LAN_SEARCH3 / KNOCK2 / LOGIN A+B sequencing
-//	bootstrap.go  — post-LOGIN 7-IOCtrl bootstrap (SETSTREAMCTRL → IPCAM_START)
+//	bootstrap.go  — post-LOGIN IOCtrl bootstrap (SETSTREAMCTRL → IPCAM_START)
 //	recv.go       — UDP recv/processor goroutines + maintenance loop + stats
 //	assembler.go  — fragment reassembly (wrapSeq, channelAsm, parseDatagram)
 //	producer.go   — wraps the Client into a go2rtc Producer
@@ -27,10 +27,12 @@ package petlibro
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -45,6 +47,28 @@ import (
 const (
 	CodecH264    byte = 0x4E
 	CodecAACADTS byte = 0x87
+)
+
+type ackMode string
+
+type streamCtrlVariant string
+
+const (
+	ackModeHigh               ackMode = "high"
+	ackModeContig             ackMode = "contig"
+	ackModeHybrid             ackMode = "hybrid"
+	ackModeHybridRev          ackMode = "hybrid-rev"
+	ackModePrevContigCurrHigh ackMode = "prev-contig-curr-high"
+	ackModePrevSentCurrHigh   ackMode = "prev-sent-curr-high"
+	ackModeLagHigh            ackMode = "lag-high"
+	ackModeLagHybrid          ackMode = "lag-hybrid"
+
+	streamCtrlLegacy   streamCtrlVariant = "legacy"
+	streamCtrlStandard streamCtrlVariant = "standard"
+	streamCtrlNone     streamCtrlVariant = "none"
+
+	defaultACKLagWindow uint64 = 8
+	defaultACKInterval         = 25 * time.Millisecond
 )
 
 // log is the package-level zerolog instance.  internal/petlibro's
@@ -62,11 +86,14 @@ func SetLogger(l zerolog.Logger) { log = l }
 
 // Packet is one fully-assembled media frame from the camera.
 type Packet struct {
-	Codec      byte
-	Payload    []byte
-	Timestamp  uint32
-	FrameNo    uint32
-	IsKeyframe bool
+	Codec                 byte
+	Payload               []byte
+	Timestamp             uint32
+	FrameNo               uint32
+	CameraFrameNo         uint32
+	Channel               byte
+	OnlineNumOrStreamByte byte
+	IsKeyframe            bool
 }
 
 // Client is one LAN session against a Petlibro camera.
@@ -80,11 +107,29 @@ type Client struct {
 	icounter uint16 // inner cmd counter (byte 4..5)
 
 	// in-order reassembly
-	wrap          wrapSeq
-	avBuffer      map[uint64]*pendingFrag
-	avNextExt     uint64
-	avHighExt     uint64
-	avPrevSubWire uint16
+	wrap           wrapSeq
+	avBuffer       map[uint64]*pendingFrag
+	avNextExt      uint64
+	avHighExt      uint64
+	avPrevSubWire  uint16
+	avNextObserved atomic.Uint64 // synchronized mirror for maintenance ACK diagnostics
+
+	// Receive-side ACK tracking is deliberately independent from the
+	// assembler cursor. forceDrain may skip a missing packet so output
+	// can continue, but only packets actually observed on the wire may
+	// advance ackWatermarkExt.
+	ackMu              sync.Mutex
+	ackWatermarkExt    uint64
+	ackSeen            map[uint64]struct{}
+	ackMode            ackMode
+	ackLagWindow       uint64
+	ackLastPrev        uint16
+	ackLastCurrent     uint16
+	ackHaveLast        bool
+	ackGapStarted      time.Time
+	ackPendingWarn     uint64
+	ackRepeatUnchanged bool
+	ackInterval        time.Duration
 
 	// monotonic counters for outgoing Packets (camera's per-channel
 	// frame_num is independent for main vs sub, so we use our own)
@@ -98,17 +143,29 @@ type Client struct {
 	// recover() dance.  Closing done first means the
 	// send-on-closed-frames race is structurally impossible — every
 	// caller writing to frames first selects on done.
-	frames    chan *Packet
-	done      chan struct{}
-	closeOnce sync.Once
+	frames       chan *Packet
+	done         chan struct{}
+	closeOnce    sync.Once
+	d2cPlainDump *os.File
+	d2cDumpMu    sync.Mutex
+	c2dPlainDump *os.File
+	c2dDumpMu    sync.Mutex
 
-	audio       bool
-	quality     string
-	strict      bool
-	verbose     bool
-	mainAsm     channelAsm // per-channel assembly state for ch=0x05
-	subAsm      channelAsm // per-channel assembly state for ch=0x07
-	gopPoisoned bool       // strict mode only: a fragment was lost in this GOP — drop P-frames until next clean IDR
+	audio             bool
+	quality           string
+	strict            bool
+	verbose           bool
+	traceACK          bool
+	traceFrag         bool
+	traceFrameInfo    bool
+	tracePackets      bool
+	sendDelayCtrl     bool
+	streamCtrlVariant streamCtrlVariant
+	streamCtrlQuality byte
+	hdProbeWait       time.Duration
+	mainAsm           channelAsm // per-channel assembly state for ch=0x05
+	subAsm            channelAsm // per-channel assembly state for ch=0x07
+	gopPoisoned       bool       // strict mode only: a fragment was lost in this GOP — drop P-frames until next clean IDR
 
 	// Camera-clock PTS state.  pendingFrameTs is the millisecond value
 	// extracted from the most recently seen metadata trailer; it
@@ -131,6 +188,21 @@ type Client struct {
 	// stranded forever.
 	stallTicks  uint8
 	lastHighExt uint64
+
+	// Compact runtime diagnostics. These are processor-goroutine owned.
+	frameInfoSeen       bool
+	frameInfoCodec      uint16
+	frameInfoFlag       byte
+	frameInfoByte4      byte
+	lastSPS             []byte
+	ackCurrStallWarned  bool
+	stallStatsActive    bool
+	stallStatsRepeat    uint64
+	stallControlPkts    uint64
+	stallStatsWatermark uint64
+	stallStatsHigh      uint64
+	stallStatsCurrent   uint64
+	stallStatsPending   uint64
 }
 
 // counters holds running totals for a stream-health summary. Atomic
@@ -155,6 +227,58 @@ type counters struct {
 	readerDrops  atomic.Uint64 // raw UDP packets dropped because the processor queue was full
 	emitDrops    atomic.Uint64 // assembled AUs dropped because the consumer queue was full
 	dualStreamIL atomic.Uint64 // dual-stream interleaved end-fragments (decision #6 defensive counter)
+
+	// Reason-specific evidence counters. These intentionally coexist
+	// with the aggregate fragSkips/vidDropped counters above so live
+	// stats retain their historical totals while identifying the
+	// decision that produced each gap or drop.
+	fragIdxGap                 atomic.Uint64
+	frameNumJumpMain           atomic.Uint64
+	frameNumJumpSub            atomic.Uint64
+	expectedDataShortfall      atomic.Uint64
+	zeroDataHardDrop           atomic.Uint64
+	wrongStreamDrop            atomic.Uint64
+	strictIDRDrop              atomic.Uint64
+	strictPDrop                atomic.Uint64
+	forceDrainFlush            atomic.Uint64
+	forceDrainEntries          atomic.Uint64
+	deferredDrop               atomic.Uint64 // AV datagrams arriving after avNextExt already advanced
+	framesWithLoss             atomic.Uint64
+	idrFramesWithLoss          atomic.Uint64
+	pFramesWithLoss            atomic.Uint64
+	missingFragmentsTotal      atomic.Uint64
+	maxMissingFragmentsInFrame atomic.Uint64
+
+	// Media-header diagnostics distinguish the original 36-byte layout
+	// from the 44-byte extended layout observed in PLAF203 captures. The
+	// sequence counters make it visible when a packet carried a usable AV
+	// sequence but could not be handed to the assembler.
+	normalMediaPackets       atomic.Uint64
+	extendedMediaCandidates  atomic.Uint64
+	extendedMediaParsed      atomic.Uint64
+	extendedMediaRejected    atomic.Uint64
+	extendedMediaDataPackets atomic.Uint64
+	extendedMediaEndPackets  atomic.Uint64
+	extendedMediaRarePackets atomic.Uint64
+	unknown0c08Remaining     atomic.Uint64
+	unknown0c0dRemaining     atomic.Uint64
+	sequenceSeenButUnhandled atomic.Uint64
+	sequenceSeenAndAssembled atomic.Uint64
+
+	frameInfoChanges    atomic.Uint64
+	frameInfoUnexpected atomic.Uint64
+	frameInfoCodec      atomic.Uint64
+	frameInfoFlag       atomic.Uint64
+	frameInfoByte4      atomic.Uint64
+
+	ackWatermark      atomic.Uint64 // current extended contiguous receive watermark (gauge)
+	ackSeenPending    atomic.Uint64 // received entries above a gap (gauge)
+	ackDuplicateOrOld atomic.Uint64 // duplicate or already-contiguously-ACKed AV packets
+	ackAdvanced       atomic.Uint64 // sequence positions by which the receive watermark advanced
+	ackHigh           atomic.Uint64 // highest extended AV sequence observed (gauge)
+	ackSent           atomic.Uint64 // maintenance ACK datagrams successfully sent
+	ackPrevLow16      atomic.Uint64 // previous/lower field in the latest maintenance ACK (gauge)
+	ackCurrentLow16   atomic.Uint64 // current/upper field in the latest maintenance ACK (gauge)
 }
 
 // countersSnapshot is a plain-value snapshot of counters for diff
@@ -177,6 +301,50 @@ type countersSnapshot struct {
 	readerDrops  uint64
 	emitDrops    uint64
 	dualStreamIL uint64
+
+	fragIdxGap                 uint64
+	frameNumJumpMain           uint64
+	frameNumJumpSub            uint64
+	expectedDataShortfall      uint64
+	zeroDataHardDrop           uint64
+	wrongStreamDrop            uint64
+	strictIDRDrop              uint64
+	strictPDrop                uint64
+	forceDrainFlush            uint64
+	forceDrainEntries          uint64
+	deferredDrop               uint64
+	framesWithLoss             uint64
+	idrFramesWithLoss          uint64
+	pFramesWithLoss            uint64
+	missingFragmentsTotal      uint64
+	maxMissingFragmentsInFrame uint64
+
+	normalMediaPackets       uint64
+	extendedMediaCandidates  uint64
+	extendedMediaParsed      uint64
+	extendedMediaRejected    uint64
+	extendedMediaDataPackets uint64
+	extendedMediaEndPackets  uint64
+	extendedMediaRarePackets uint64
+	unknown0c08Remaining     uint64
+	unknown0c0dRemaining     uint64
+	sequenceSeenButUnhandled uint64
+	sequenceSeenAndAssembled uint64
+
+	frameInfoChanges    uint64
+	frameInfoUnexpected uint64
+	frameInfoCodec      uint64
+	frameInfoFlag       uint64
+	frameInfoByte4      uint64
+
+	ackWatermark      uint64
+	ackSeenPending    uint64
+	ackDuplicateOrOld uint64
+	ackAdvanced       uint64
+	ackHigh           uint64
+	ackSent           uint64
+	ackPrevLow16      uint64
+	ackCurrentLow16   uint64
 }
 
 func (c *counters) snapshot() countersSnapshot {
@@ -198,26 +366,82 @@ func (c *counters) snapshot() countersSnapshot {
 		readerDrops:  c.readerDrops.Load(),
 		emitDrops:    c.emitDrops.Load(),
 		dualStreamIL: c.dualStreamIL.Load(),
+
+		fragIdxGap:                 c.fragIdxGap.Load(),
+		frameNumJumpMain:           c.frameNumJumpMain.Load(),
+		frameNumJumpSub:            c.frameNumJumpSub.Load(),
+		expectedDataShortfall:      c.expectedDataShortfall.Load(),
+		zeroDataHardDrop:           c.zeroDataHardDrop.Load(),
+		wrongStreamDrop:            c.wrongStreamDrop.Load(),
+		strictIDRDrop:              c.strictIDRDrop.Load(),
+		strictPDrop:                c.strictPDrop.Load(),
+		forceDrainFlush:            c.forceDrainFlush.Load(),
+		forceDrainEntries:          c.forceDrainEntries.Load(),
+		deferredDrop:               c.deferredDrop.Load(),
+		framesWithLoss:             c.framesWithLoss.Load(),
+		idrFramesWithLoss:          c.idrFramesWithLoss.Load(),
+		pFramesWithLoss:            c.pFramesWithLoss.Load(),
+		missingFragmentsTotal:      c.missingFragmentsTotal.Load(),
+		maxMissingFragmentsInFrame: c.maxMissingFragmentsInFrame.Load(),
+
+		normalMediaPackets:       c.normalMediaPackets.Load(),
+		extendedMediaCandidates:  c.extendedMediaCandidates.Load(),
+		extendedMediaParsed:      c.extendedMediaParsed.Load(),
+		extendedMediaRejected:    c.extendedMediaRejected.Load(),
+		extendedMediaDataPackets: c.extendedMediaDataPackets.Load(),
+		extendedMediaEndPackets:  c.extendedMediaEndPackets.Load(),
+		extendedMediaRarePackets: c.extendedMediaRarePackets.Load(),
+		unknown0c08Remaining:     c.unknown0c08Remaining.Load(),
+		unknown0c0dRemaining:     c.unknown0c0dRemaining.Load(),
+		sequenceSeenButUnhandled: c.sequenceSeenButUnhandled.Load(),
+		sequenceSeenAndAssembled: c.sequenceSeenAndAssembled.Load(),
+
+		frameInfoChanges:    c.frameInfoChanges.Load(),
+		frameInfoUnexpected: c.frameInfoUnexpected.Load(),
+		frameInfoCodec:      c.frameInfoCodec.Load(),
+		frameInfoFlag:       c.frameInfoFlag.Load(),
+		frameInfoByte4:      c.frameInfoByte4.Load(),
+
+		ackWatermark:      c.ackWatermark.Load(),
+		ackSeenPending:    c.ackSeenPending.Load(),
+		ackDuplicateOrOld: c.ackDuplicateOrOld.Load(),
+		ackAdvanced:       c.ackAdvanced.Load(),
+		ackHigh:           c.ackHigh.Load(),
+		ackSent:           c.ackSent.Load(),
+		ackPrevLow16:      c.ackPrevLow16.Load(),
+		ackCurrentLow16:   c.ackCurrentLow16.Load(),
 	}
 }
 
 // Dial parses a petlibro:// URL, opens a UDP socket, optionally
 // discovers the camera address by UID, runs LAN_SEARCH3 + KNOCK2 +
-// LOGIN A/B + the 7-cmd Petlibro bootstrap, then starts the receive
+// LOGIN A/B + the Petlibro bootstrap, then starts the receive
 // worker.  Returns once IPCAM_START has been sent and the AV-ready ack
 // acknowledged — the camera will then stream video (and audio if
 // &audio=true).
 //
 // URL shape:
 //
-//	petlibro://<host>?uid=<UID>[&audio=true][&quality=hd|sd][&strict=1][&verbose=1]
-//	petlibro://?uid=<UID>[&subnet=192.168.1.0/24][&audio=true][&quality=hd|sd][&strict=1][&verbose=1]
+//	petlibro://<host>?uid=<UID>[&audio=true][&quality=hd|sd][&ack=<mode>][&ack_lag_window=8][&send_delay_ctrl=1][&hd_probe_wait_ms=N][&strict=1][&verbose=1][&dump_plain=<path>][&dump_d2c_plain=<path>][&dump_c2d_plain=<path>]
+//	petlibro://?uid=<UID>[&subnet=192.168.1.0/24][&audio=true][&quality=hd|sd][&ack=<mode>][&ack_lag_window=8][&send_delay_ctrl=1][&hd_probe_wait_ms=N][&strict=1][&verbose=1][&dump_plain=<path>][&dump_d2c_plain=<path>][&dump_c2d_plain=<path>]
 //
 //	strict=1 — drop any IDR with a fragment loss and poison the GOP
 //	           (pristine pixels at the cost of multi-second freezes
 //	           on lossy networks).  Default is to emit gapped IDRs
 //	           with localised macroblock artefacts and drop gapped
 //	           P-frames (avoids cascading inter-frame errors).
+//
+//	ack=high   — ACK the highest observed AV sequence (default; compatible)
+//	ack=contig — ACK only the highest contiguous received sequence
+//	ack=hybrid — send contiguous/high as the ACK window endpoints
+//	Additional ACK modes are experimental field-role candidates; verbose logs
+//	name each role because the two wire fields' exact semantics are unknown.
+//	ack_lag_window bounds lag-high and lag-hybrid (default 8 packets).
+//	send_delay_ctrl=1 sends TUTK IOTYPE_INNER_SND_DATA_DELAY immediately
+//	before IPCAM_START, as the public AVAPI Linux client sample does.
+//
+//	dump_plain and dump_d2c_plain record decrypted device-to-client packets.
+//	dump_c2d_plain records timestamped client-to-device inner bodies.
 //
 // Matches the project-wide Dial(rawURL string) (*Client, error)
 // signature used by every other UDP/TCP camera adapter — see
@@ -249,6 +473,30 @@ func Dial(rawURL string) (*Client, error) {
 	quality := q.Get("quality")
 	if quality == "" {
 		quality = "hd"
+	}
+	mode, err := parseACKMode(q.Get("ack"))
+	if err != nil {
+		return nil, err
+	}
+	lagWindow, err := parseACKLagWindow(q.Get("ack_lag_window"))
+	if err != nil {
+		return nil, err
+	}
+	ackInterval, err := parseACKInterval(q.Get("ack_interval_ms"))
+	if err != nil {
+		return nil, err
+	}
+	streamVariant, err := parseStreamCtrlVariant(q.Get("streamctrl_variant"))
+	if err != nil {
+		return nil, err
+	}
+	streamQuality, err := parseStreamCtrlQuality(q.Get("streamctrl_quality"), quality)
+	if err != nil {
+		return nil, err
+	}
+	hdProbeWait, err := parseHDProbeWait(q.Get("hd_probe_wait_ms"))
+	if err != nil {
+		return nil, err
 	}
 
 	var cam *net.UDPAddr
@@ -306,33 +554,151 @@ func Dial(rawURL string) (*Client, error) {
 			return nil, err
 		}
 	}
+	d2cDumpPath := q.Get("dump_d2c_plain")
+	if d2cDumpPath == "" {
+		d2cDumpPath = q.Get("dump_plain")
+	}
+	var d2cPlainDump *os.File
+	if d2cDumpPath != "" {
+		d2cPlainDump, err = os.Create(d2cDumpPath)
+		if err != nil {
+			_ = udp.Close()
+			return nil, fmt.Errorf("petlibro: create D2C plaintext dump %q: %w", d2cDumpPath, err)
+		}
+	}
+	var c2dPlainDump *os.File
+	if path := q.Get("dump_c2d_plain"); path != "" {
+		c2dPlainDump, err = os.Create(path)
+		if err != nil {
+			if d2cPlainDump != nil {
+				_ = d2cPlainDump.Close()
+			}
+			_ = udp.Close()
+			return nil, fmt.Errorf("petlibro: create C2D plaintext dump %q: %w", path, err)
+		}
+	}
 	c := &Client{
-		conn:    udp,
-		cam:     cam,
-		uid:     uid,
-		nonce:   nonce,
-		kseq:    2,
-		audio:   boolQuery(q, "audio"),
-		quality: quality,
-		strict:  boolQuery(q, "strict"),
-		verbose: verbose,
-		frames:  make(chan *Packet, 1024),
-		done:    make(chan struct{}),
+		conn:               udp,
+		cam:                cam,
+		uid:                uid,
+		nonce:              nonce,
+		kseq:               2,
+		audio:              boolQuery(q, "audio"),
+		quality:            quality,
+		strict:             boolQuery(q, "strict"),
+		verbose:            verbose,
+		traceACK:           boolQuery(q, "trace_ack"),
+		traceFrag:          boolQuery(q, "trace_frag"),
+		traceFrameInfo:     boolQuery(q, "trace_frameinfo"),
+		tracePackets:       boolQuery(q, "trace_packets"),
+		sendDelayCtrl:      boolQuery(q, "send_delay_ctrl"),
+		ackMode:            mode,
+		ackLagWindow:       lagWindow,
+		ackRepeatUnchanged: boolQuery(q, "ack_repeat_unchanged"),
+		ackInterval:        ackInterval,
+		streamCtrlVariant:  streamVariant,
+		streamCtrlQuality:  streamQuality,
+		hdProbeWait:        hdProbeWait,
+		frames:             make(chan *Packet, 1024),
+		done:               make(chan struct{}),
+		d2cPlainDump:       d2cPlainDump,
+		c2dPlainDump:       c2dPlainDump,
+	}
+	if c.verbose {
+		log.Debug().Msgf("petlibro: debug config ackMode=%s lagWindow=%d ackInterval=%s ackRepeatUnchanged=%t sendDelayCtrl=%t streamctrlVariant=%s streamctrlQuality=%d hdProbeWait=%s traces ack=%t frag=%t frameinfo=%t packets=%t",
+			c.ackMode, c.ackLagWindow, c.ackInterval, c.ackRepeatUnchanged,
+			c.sendDelayCtrl, c.streamCtrlVariant, c.streamCtrlQuality, c.hdProbeWait,
+			c.traceACK, c.traceFrag, c.traceFrameInfo, c.tracePackets)
 	}
 	if err := c.handshake(); err != nil {
 		clearDiscoveryCache(uid, q["subnet"])
-		_ = udp.Close()
+		_ = c.Close()
 		return nil, err
 	}
 	if err := c.bootstrap(); err != nil {
 		clearDiscoveryCache(uid, q["subnet"])
-		_ = udp.Close()
+		_ = c.Close()
 		return nil, err
 	}
 
 	go c.recvLoop()
 	go c.maintenanceLoop()
 	return c, nil
+}
+
+func parseACKMode(value string) (ackMode, error) {
+	if value == "" {
+		return ackModeHigh, nil
+	}
+	mode := ackMode(value)
+	switch mode {
+	case ackModeHigh, ackModeContig, ackModeHybrid, ackModeHybridRev,
+		ackModePrevContigCurrHigh, ackModePrevSentCurrHigh,
+		ackModeLagHigh, ackModeLagHybrid:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("petlibro: ack must be high, contig, hybrid, hybrid-rev, prev-contig-curr-high, prev-sent-curr-high, lag-high, or lag-hybrid (got %q)", value)
+	}
+}
+
+func parseACKLagWindow(value string) (uint64, error) {
+	if value == "" {
+		return defaultACKLagWindow, nil
+	}
+	window, err := strconv.ParseUint(value, 10, 16)
+	if err != nil || window == 0 {
+		return 0, fmt.Errorf("petlibro: ack_lag_window must be an integer from 1 to 65535 (got %q)", value)
+	}
+	return window, nil
+}
+
+func parseACKInterval(value string) (time.Duration, error) {
+	if value == "" {
+		return defaultACKInterval, nil
+	}
+	ms, err := strconv.ParseUint(value, 10, 16)
+	if err != nil || ms == 0 {
+		return 0, fmt.Errorf("petlibro: ack_interval_ms must be an integer from 1 to 65535 (got %q)", value)
+	}
+	return time.Duration(ms) * time.Millisecond, nil
+}
+
+func parseStreamCtrlVariant(value string) (streamCtrlVariant, error) {
+	if value == "" {
+		return streamCtrlLegacy, nil
+	}
+	v := streamCtrlVariant(value)
+	switch v {
+	case streamCtrlLegacy, streamCtrlStandard, streamCtrlNone:
+		return v, nil
+	default:
+		return "", fmt.Errorf("petlibro: streamctrl_variant must be legacy, standard, or none (got %q)", value)
+	}
+}
+
+func parseStreamCtrlQuality(value, quality string) (byte, error) {
+	if value == "" {
+		if quality == "sd" {
+			return 2, nil
+		}
+		return 1, nil
+	}
+	n, err := strconv.ParseUint(value, 10, 8)
+	if err != nil {
+		return 0, fmt.Errorf("petlibro: streamctrl_quality must be an integer from 0 to 255 (got %q)", value)
+	}
+	return byte(n), nil
+}
+
+func parseHDProbeWait(value string) (time.Duration, error) {
+	if value == "" || value == "0" {
+		return 0, nil
+	}
+	ms, err := strconv.ParseUint(value, 10, 16)
+	if err != nil || ms > 60000 {
+		return 0, fmt.Errorf("petlibro: hd_probe_wait_ms must be an integer from 0 to 60000 (got %q)", value)
+	}
+	return time.Duration(ms) * time.Millisecond, nil
 }
 
 // boolQuery parses a URL query bool using strconv.ParseBool's
@@ -368,7 +734,30 @@ func (c *Client) send(p []byte) error {
 	return err
 }
 
+func (c *Client) dumpC2DInner(body []byte) {
+	if c.verbose && c.tracePackets {
+		log.Debug().Int("len", len(body)).Hex("plain", body).Msg("petlibro C2D inner")
+	}
+	if c.c2dPlainDump != nil {
+		record := make([]byte, 12+len(body))
+		binary.LittleEndian.PutUint64(record, uint64(time.Now().UnixNano()))
+		binary.LittleEndian.PutUint32(record[8:], uint32(len(body)))
+		copy(record[12:], body)
+
+		c.c2dDumpMu.Lock()
+		n, err := c.c2dPlainDump.Write(record)
+		c.c2dDumpMu.Unlock()
+		if err == nil && n != len(record) {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			log.Warn().Err(err).Msg("petlibro: write C2D plaintext inner-body dump")
+		}
+	}
+}
+
 func (c *Client) sendInner(body []byte) error {
+	c.dumpC2DInner(body)
 	out := buildOuter(c.nonce, c.kseq, body, 0x00, 0x00, flagsSession)
 	c.kseq = (c.kseq + 1) & 0xFFFF
 	return c.send(out)
@@ -423,6 +812,16 @@ func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.done)
 		_ = c.conn.Close()
+		c.d2cDumpMu.Lock()
+		if c.d2cPlainDump != nil {
+			_ = c.d2cPlainDump.Close()
+		}
+		c.d2cDumpMu.Unlock()
+		c.c2dDumpMu.Lock()
+		if c.c2dPlainDump != nil {
+			_ = c.c2dPlainDump.Close()
+		}
+		c.c2dDumpMu.Unlock()
 		close(c.frames)
 	})
 	return nil

@@ -1,192 +1,94 @@
-# Petlibro
+# Petlibro module
 
-Clean-room LAN P2P client for [Petlibro](https://petlibro.com/) pet
-cameras using the camera's Kalay/TUTK-family UDP protocol on port
-32761. No cloud account, no Petlibro app, no vendor SDK is required at
-runtime; the only cloud dependency is the *initial* camera provisioning
-(which you do once via the Petlibro app on your phone) and any
-firmware-side authentication gate that camera does against the Petlibro
-cloud whitelist.
+The Petlibro module registers the `petlibro://` input with go2rtc. The transport
+implementation is a clean-room LAN client for the Kalay/TUTK-family UDP protocol
+used by Petlibro camera feeders on port `32761`.
 
-**Features:**
+Runtime streaming does not require a Petlibro account, vendor SDK, or CGO. The
+camera must first be provisioned with the Petlibro app, and its firmware may
+still depend on the vendor cloud connection to authorize LAN sessions.
 
-- H.264 video (HD / SD, sticky — see "Stream quality" below)
-- AAC audio (`audio=true`)
-- Pure-Go, no CGO, no native SDK
+## Support status
 
-**Known limitations:**
+| Model | Status | Notes |
+| --- | --- | --- |
+| PLAF203 | Verified | H.264 HD/SD and optional AAC audio |
+| PLAF103 | Protocol evidence only | Login and bootstrap captures informed the implementation; live playback is not yet verified |
+| Other Petlibro cameras | Unknown | May work when they share the same firmware protocol, but should be treated as untested |
 
-- No two-way audio / backchannel (see [Roadmap](#roadmap))
-- Stream-quality switching is **not** per-session — see "Stream quality"
-- One model verified (PLAF203); other PLAF variants expected to work
-  but untested — see [Supported models](#supported-models)
+Two-way audio is not implemented.
 
-## Stream URL format
+## URL format
 
-```
-petlibro://[IP]?uid=[UID][&audio=true][&quality=hd|sd][&strict=1][&verbose=1]
-petlibro://?uid=[UID][&subnet=192.168.1.0/24][&audio=true][&quality=hd|sd][&strict=1][&verbose=1]
+```text
+petlibro://CAMERA_IP?uid=20_CHARACTER_UID&quality=hd
+petlibro://?uid=20_CHARACTER_UID&subnet=192.168.1.0/24&quality=hd
 ```
 
-| Parameter | Required | Default | Description                                                     |
-|-----------|----------|---------|-----------------------------------------------------------------|
-| `IP`      | no       | auto    | Camera's local IP address (port defaults to `32761`); omit to discover by UID |
-| `uid`     | yes      | —       | 20-character TUTK camera UID                                    |
-| `subnet`  | no       | local   | Extra IPv4 CIDR to scan when cameras are routed, not on the local broadcast subnet |
-| `audio`   | no       | `false` | Enable AAC audio (`true` or `1`)                                |
-| `quality` | no       | `hd`    | Pick `hd` or `sd` from the camera's already-enabled streams     |
-| `strict`  | no       | `false` | Drop any IDR with fragment loss instead of emitting it gapped   |
-| `verbose` | no       | `false` | Periodic stream-health stats + handshake trace to stdout        |
+Core options:
 
-**Example go2rtc.yaml:**
+| Parameter | Required | Default | Description |
+| --- | --- | --- | --- |
+| URL host | no | discovery | Fixed camera address; UDP port defaults to `32761` |
+| `uid` | yes | — | Exact 20-character camera UID |
+| `subnet` | no | local broadcast | Additional IPv4 CIDR used for discovery; may be repeated |
+| `quality` | no | `hd` | Requests and selects `hd` or `sd` video |
+| `audio` | no | `false` | Requests AAC audio when `true` or `1` |
+| `strict` | no | `false` | Drops damaged IDRs and dependent GOP frames instead of emitting a gapped IDR |
+| `hd_probe_wait_ms` | no | `0` | Waits up to 60000 ms for a higher-resolution SPS before publishing an HD track |
+| `verbose` | no | `false` | Enables compact bootstrap, probe, health, and ACK diagnostics |
 
-```yaml
-streams:
-  petfeeder_hd: petlibro://192.168.1.42?uid=PLAF20300000000ABCD0&audio=true
-  petfeeder_sd: petlibro://?uid=PLAF20300000000ABCD0&subnet=192.168.1.0/24&quality=sd
+The tracked [`go2rtc.example.yaml`](../../go2rtc.example.yaml) contains a
+recommended PLAF203 configuration. Experimental ACK, stream-control, trace, and
+capture options are documented in the
+[Petlibro debugging guide](../../docs/PETLIBRO_DEBUGGING.md).
+
+## Discovery
+
+When the URL omits its host, go2rtc sends a UID-specific LAN search and accepts
+the matching camera's response address. Local broadcast discovery requires the
+camera and go2rtc process to share a broadcast domain. Add `subnet=` for routed
+IPv4 networks or use a fixed address. Container discovery normally requires
+host networking.
+
+## Quality and codec probe
+
+The default `legacy` stream-control path sends the captured Petlibro control
+body for the requested quality before `IPCAM_START`. Stream selection is then
+enforced from each frame's metadata byte.
+
+On the tested PLAF203, an HD session can start with a 640x360 SPS and switch to
+1920x1080 after several seconds. By default, go2rtc publishes the first usable
+SPS. Set `hd_probe_wait_ms` when the first advertised RTSP description must wait
+for a higher resolution. The bounded wait ends when a higher resolution appears
+or the timeout expires.
+
+Strict mode affects damaged-frame output only. It does not change stream
+selection, packet parsing, ACK tracking, or recovery.
+
+## Implementation notes
+
+The post-login flow is:
+
+```text
+LAN_SEARCH3 -> KNOCK2 -> LOGIN A/B -> stream/bootstrap IOCtrls
+  -> AV-ready ACK -> receive/maintenance loops -> H.264/AAC producer
 ```
 
-## How to find the UID
+The parser supports both the normal 36-byte media header and the alternate
+44-byte media layout used by packet families `0c08`, `0c09`, `0c0c`, and
+`0c0d`. Both layouts enter one assembler after structural validation. Main,
+sub, and audio channels retain independent frame state.
 
-The 20-character UID is printed on a label on the back/bottom of the
-camera (under or near the QR code used for app-pairing). You can also
-find it in the Petlibro app under camera details — most Petlibro
-PLAF-series cameras format the UID as a printable ASCII string starting
-with the model prefix (e.g. `PLAF203...`).
+Receive ACK state is independent from the assembler output cursor. The
+contiguous ACK watermark advances only for wire sequences actually received;
+force-draining an assembler hole does not acknowledge that missing packet.
 
-If you omit the IP, go2rtc sends a UID-specific Kalay LAN_SEARCH probe
-on UDP/32761 and uses the source address from the matching camera's
-reply. This requires go2rtc and the camera to be on the same broadcast
-domain; Docker deployments usually need host networking for discovery.
-If cameras are on a routed subnet, add `subnet=192.168.1.0/24` so
-go2rtc can unicast the same probe across that network. You can still
-provide a fixed IP to skip discovery.
+Wire constants and captured templates live in
+[`pkg/petlibro/templates.go`](../../pkg/petlibro/templates.go). Parser,
+assembler, ACK, and bootstrap tests live beside the implementation in
+[`pkg/petlibro`](../../pkg/petlibro/).
 
-## Stream quality
-
-> [!IMPORTANT]
-> Petlibro cameras run with one or both of their HD (1920×1080, main)
-> and SD (640×360, sub) streams *pre-enabled* in their firmware's
-> cloud-side stream configuration. The `quality=` URL parameter picks
-> which of the **already-enabled** streams go2rtc keeps; it does NOT
-> turn streams on or off at the camera.
-
-If you set `quality=sd` but the camera was provisioned HD-only by the
-Petlibro app, no frames will arrive. To change which streams the camera
-publishes you have to open the Petlibro app and toggle them there — the
-setting is sticky in the cloud config and persists across reboots and
-go2rtc restarts.
-
-When both streams are enabled, the camera dual-streams them on the
-same UDP channels and go2rtc filters by the trailer-borne stream-id
-byte (`0x01 = HD`, `0x02 = SD`). See `pkg/petlibro/templates.go`
-`qualityHD` / `qualitySD` and `pkg/petlibro/client.go`
-`stripFragmentMetadataTrailer` for the wire-level details.
-
-## Strict mode
-
-`strict=1` flips the lossy-network policy:
-
-| Mode             | On IDR with lost fragment | On P-frame with lost fragment |
-|------------------|---------------------------|-------------------------------|
-| Default          | emit gapped (artefacts)   | drop                          |
-| `strict=1`       | drop + poison GOP         | drop                          |
-
-Default mode trades localised macroblock artefacts at the gap for video
-fluency. Strict mode trades a multi-second freeze (until the next clean
-IDR) for pristine pixels. Use strict when downstream decoder warnings
-are louder than freezes are.
-
-## Supported models
-
-Verified working (one author with one camera):
-
-| Model    | Firmware tested            | Notes                              |
-|----------|---------------------------|-------------------------------------|
-| PLAF203  | factory-shipped 2024-2025 | HD-only and HD+SD dual-stream both ok |
-
-Expected to work but **untested** (same TUTK-firmware family, same
-LOGIN body bytes per cloud-RE analysis, same bootstrap sequence):
-
-- PLAF103
-- Other PLAF-prefix PLAF-series cameras
-- Other Petlibro cameras built on the same Kalay/TUTK firmware
-
-If you try this against another model, please open an issue (or send a
-PR adding your model + firmware version to this table) — the most
-likely failure mode is a small divergence in the IOCtrl bootstrap
-sequence that's trivial to fix once observed.
-
-## Roadmap
-
-- Two-way audio (backchannel to camera speaker) — **out of scope** for
-  the initial PR. PLAF cameras have a speaker and the protocol family
-  supports a backchannel (cf. `pkg/wyze/backchannel.go`,
-  `pkg/tapo/backchannel.go`), but the Petlibro-specific wire bytes
-  haven't been captured. Future work.
-
-## Troubleshooting
-
-**`petlibro: LOGIN_RESP timeout`** within 5 s of starting the stream:
-the camera received LOGIN A+B but never acknowledged. Most likely
-causes (in observed-frequency order):
-
-1. **Camera was never provisioned via the Petlibro app on this LAN.**
-   The camera maintains a long-lived cloud link back to Petlibro
-   infrastructure (Kalay/Nebula whitelist gate) and refuses LAN
-   sessions from peers whose presence hasn't been signalled through
-   that channel. Open the Petlibro app once on a phone on the same
-   LAN — that's enough to flip the gate. The app does NOT need to
-   stay running afterwards.
-2. **Wrong UID.** The camera silently ignores LOGIN bytes whose
-   embedded `view_account` doesn't resolve to a known camera. Verify
-   the 20-character UID matches the label.
-3. **Wrong IP or LAN discovery blocked.** Re-check the camera's current
-   LAN IP after a router reboot if DHCP reassigned it. If using the
-   UID-only URL, verify go2rtc is on the same broadcast domain as the
-   camera; Docker usually needs host networking.
-4. **Camera offline / unreachable.** Standard ICMP/UDP-32761 reachability.
-
-The `verbose=1` URL parameter enables handshake tracing to stdout so
-you can see how far the LAN_SEARCH3 → KNOCK2 → LOGIN A/B sequence
-got before the timeout.
-
-**Video starts but with corrupted macroblocks at the bottom strip:**
-the IDR's end fragment is being lost on your network and you're seeing
-the default "emit gapped IDR" recovery path. Either fix the network
-(usually 2.4 GHz wifi congestion) or enable `strict=1` to drop gapped
-IDRs entirely.
-
-**`ffmpeg` reports `Invalid video timestamp X -> X` warnings:** harmless
-PTS-bumping near forceDrain flushes. The PTS bumper guarantees strictly
-monotonic output but can produce nano-deltas when several AUs flush
-inside one camera-clock millisecond.
-
-## Wire protocol references
-
-The protocol bytes were reverse-engineered from PCAPdroid captures of
-the official Petlibro Android app talking to PLAF103 / PLAF203 cameras.
-Key constants:
-
-- **LOGIN A/B bodies** (570 / 572 B) are byte-exact templates with
-  only the 4-byte `login_serial` at body+0x14 varying per attempt.
-  LOGIN B's serial is always LOGIN A's + 1. The encrypted region
-  begins at body+0x24 and carries `view_account="admin"`,
-  `view_password="888888"`, an opcode-support bitmap, and a few flag
-  bytes; encryption is the same Luffy / TUTK `ReverseTransCodePartial`
-  used by Wyze. See `pkg/petlibro/templates.go` and
-  `pkg/petlibro/templates_test.go` (byte-exact regression fixture).
-- **Bootstrap sequence**: LAN_SEARCH3 → KNOCK2 → LOGIN A → LOGIN B →
-  5-IOCtrl-cmd bootstrap (SETSTREAMCTRL, vendor 0x0372,
-  GET_AUDIO_OUT_FORMAT, GET_FORMAT, IPCAM_START) → optional
-  AUDIO_ENABLE. See `pkg/petlibro/client.go` `bootstrap()`. The
-  official Petlibro app sends a 257-byte DTLS-shaped first packet
-  before LOGIN A; we empirically bisected it (post-power-cycle the
-  camera responds to LOGIN within 15 ms without it) and dropped it.
-  Evidence trail: `.omc/research/_dtls_skip_test/`.
-- **Frame reassembly**: per-channel (ch=0x05 main / 0x07 sub /
-  0x03 audio); end-fragment detected by 15-byte ms-timestamp trailer
-  on the LAST data fragment (signature: codec_id 0x4e + flags +
-  stream-id + 7 zero bytes + 4 B LE ms timestamp). See
-  `pkg/petlibro/client.go` `stripFragmentMetadataTrailer` and the
-  per-channel `channelAsm` state.
+For packet formats, counters, dump replay, and failure diagnosis, see the
+[debugging guide](../../docs/PETLIBRO_DEBUGGING.md). For code structure and
+validation, see the [development guide](../../docs/DEVELOPMENT.md).
