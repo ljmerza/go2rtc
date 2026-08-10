@@ -23,7 +23,8 @@ depend on its vendor cloud connection for firmware-side session authorization.
 ## Install from source
 
 ```bash
-git clone https://github.com/tannerln7/go2rtc.git petlibro-go2rtc
+git clone --branch petlibro-integration \
+  https://github.com/tannerln7/go2rtc.git petlibro-go2rtc
 cd petlibro-go2rtc
 go build -o go2rtc .
 ```
