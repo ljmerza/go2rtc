@@ -32,7 +32,7 @@ streams:
   # Tuya Cloud API: WebRTC main stream
   tuya_webrtc:
    - tuya://openapi.tuyaus.com?device_id=XXX&uid=XXX&client_id=XXX&client_secret=XXX
-  
+
   # Tuya Cloud API: WebRTC sub stream
   tuya_webrtc_sd:
    - tuya://openapi.tuyaus.com?device_id=XXX&uid=XXX&client_id=XXX&client_secret=XXX&resolution=sd

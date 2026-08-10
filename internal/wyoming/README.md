@@ -23,7 +23,7 @@ This module provide [Wyoming Protocol](https://www.home-assistant.io/integration
 3. Wake Word (WAKE)
    - [OpenWakeWord](https://www.home-assistant.io/voice_control/create_wake_word/)
 4. Speech-to-Text (STT)
-   - [Whisper](https://github.com/home-assistant/addons/blob/master/whisper/) 
+   - [Whisper](https://github.com/home-assistant/addons/blob/master/whisper/)
    - [Vosk](https://github.com/rhasspy/hassio-addons/blob/master/vosk/)
 5. Conversation agent (INTENT)
    - [Home Assistant](https://www.home-assistant.io/integrations/conversation/)
@@ -48,7 +48,7 @@ Your stream must support audio transmission in PCM codec (include PCMA/PCMU).
 ```yaml
 wyoming:
   stream_name_from_streams_section:
-    listen: :10700 
+    listen: :10700
     name: "My Satellite"                # optional name
     wake_uri: tcp://192.168.1.23:10400  # optional WAKE service
     vad_threshold: 1                    # optional VAD threshold (from 0.1 to 3.5)

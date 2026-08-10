@@ -20,7 +20,7 @@ streams:
   amcrest_doorbell:
     - rtsp://username:password@192.168.1.123:554/cam/realmonitor?channel=1&subtype=0#backchannel=0
   unifi_camera: rtspx://192.168.1.123:7441/fD6ouM72bWoFijxK
-  glichy_camera: ffmpeg:rtsp://username:password@192.168.1.123/live/ch00_1 
+  glichy_camera: ffmpeg:rtsp://username:password@192.168.1.123/live/ch00_1
 ```
 
 ### Recommendations
@@ -66,7 +66,7 @@ rtsp:
   listen: ":8554"    # RTSP Server TCP port, default - 8554
   username: "admin"  # optional, default - disabled
   password: "pass"   # optional, default - disabled
-  default_query: "video&audio"  # optional, default codecs filters 
+  default_query: "video&audio"  # optional, default codecs filters
 ```
 
 By default go2rtc provide RTSP-stream with only one first video and only one first audio. You can change it with the `default_query` setting:

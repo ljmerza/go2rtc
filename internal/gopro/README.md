@@ -4,7 +4,7 @@
 
 Support streaming from [GoPro](https://gopro.com/) cameras, connected via USB or Wi-Fi to Linux, Mac, Windows.
 
-Supported models: HERO9, HERO10, HERO11, HERO12.  
+Supported models: HERO9, HERO10, HERO11, HERO12.
 Supported OS: Linux, Mac, Windows, [HassOS](https://www.home-assistant.io/installation/)
 
 Other camera models have different APIs. I will try to add them in future versions.

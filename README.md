@@ -1,5 +1,9 @@
 # Petlibro go2rtc
 
+> This source snapshot is maintained as part of the canonical Petlibro Local
+> backend repository under `petlibro-local/go2rtc`. Historical standalone forks
+> are references only; make future Petlibro changes here.
+
 This repository is a fork of [go2rtc](https://github.com/AlexxIT/go2rtc) with a
 clean-room, LAN-only input for Petlibro camera feeders. It connects directly to
 the camera over its Kalay/TUTK-family UDP protocol and exposes the resulting
@@ -22,10 +26,10 @@ depend on its vendor cloud connection for firmware-side session authorization.
 
 ## Install from source
 
+From the root of the Petlibro Local repository:
+
 ```bash
-git clone --branch petlibro-integration \
-  https://github.com/tannerln7/go2rtc.git petlibro-go2rtc
-cd petlibro-go2rtc
+cd petlibro-local/go2rtc
 go build -o go2rtc .
 ```
 

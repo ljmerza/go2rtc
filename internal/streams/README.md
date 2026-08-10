@@ -75,11 +75,11 @@ preload:
   camera3: "video=h264&audio=opus"             # preload H264 video and OPUS audio
 
 streams:
-  camera1: 
+  camera1:
     - rtsp://192.168.1.100/stream
-  camera2: 
-    - rtsp://192.168.1.101/stream  
-  camera3: 
+  camera2:
+    - rtsp://192.168.1.101/stream
+  camera3:
     - rtsp://192.168.1.102/h265stream
     - ffmpeg:camera3#video=h264#audio=opus#hardware
 ```

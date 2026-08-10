@@ -20,9 +20,9 @@ streams:
   # admin username and UPPERCASE SHA256 cloud-password hash
   camera3: tapo://admin:UPPERCASE-SHA256@192.168.1.123
   # VGA stream (the so called substream, the lower resolution one)
-  camera4: tapo://cloud-password@192.168.1.123?subtype=1 
+  camera4: tapo://cloud-password@192.168.1.123?subtype=1
   # HD stream (default)
-  camera5: tapo://cloud-password@192.168.1.123?subtype=0 
+  camera5: tapo://cloud-password@192.168.1.123?subtype=0
 ```
 
 ```bash

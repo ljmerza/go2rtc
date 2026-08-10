@@ -4,7 +4,7 @@
 ffmpeg -i "rtsp://..." -movflags +frag_keyframe+separate_moof+default_base_moof+empty_moov -frag_duration 1 -c copy -t 5 sample.mp4
 ```
 
-- movflags frag_keyframe 
+- movflags frag_keyframe
   Start a new fragment at each video keyframe.
 - frag_duration duration
   Create fragments that are duration microseconds long.

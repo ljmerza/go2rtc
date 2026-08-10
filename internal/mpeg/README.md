@@ -1,7 +1,7 @@
 # MPEG
 
 This module provides an [HTTP API](../api/README.md) for:
- 
+
 - Streaming output in `mpegts` format.
 - Streaming output in `adts` format.
 - Streaming ingest in `mpegts` format.

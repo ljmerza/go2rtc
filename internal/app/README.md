@@ -86,11 +86,11 @@ You can set different log levels for different modules.
 
 ```yaml
 log:
-  format: ""        # empty (default, autodetect color support), color, json, text 
+  format: ""        # empty (default, autodetect color support), color, json, text
   level: "info"     # disabled, trace, debug, info (default), warn, error
   output: "stdout"  # empty (only to memory), stderr, stdout (default)
   time: "UNIXMS"    # empty (disable timestamp), UNIXMS (default), UNIXMICRO, UNIXNANO
-  
+
   api: trace   # module name: log level
 ```
 

@@ -30,7 +30,7 @@ Source also supports HTTP and TCP streams with autodetection for different forma
 streams:
   # [HTTP-FLV] stream in video/x-flv format
   http_flv: http://192.168.1.123:20880/api/camera/stream/780900131155/657617
-  
+
   # [JPEG] snapshots from Dahua camera, will be converted to MJPEG stream
   dahua_snap: http://admin:password@192.168.1.123/cgi-bin/snapshot.cgi?channel=1
 

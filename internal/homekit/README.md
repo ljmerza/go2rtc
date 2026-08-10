@@ -10,11 +10,11 @@ This module supports both client and server for the [Apple HomeKit](https://www.
 - HomeKit device can be paired with only one ecosystem. So, if you have paired it to an iPhone (Apple Home), you can't pair it with Home Assistant or go2rtc. Or if you have paired it to go2rtc, you can't pair it with an iPhone
 - HomeKit device should be on the same network with working [mDNS](https://en.wikipedia.org/wiki/Multicast_DNS) between the device and go2rtc
 
-go2rtc supports importing paired HomeKit devices from [Home Assistant](../hass/README.md). 
-So you can use HomeKit camera with Home Assistant and go2rtc simultaneously. 
+go2rtc supports importing paired HomeKit devices from [Home Assistant](../hass/README.md).
+So you can use HomeKit camera with Home Assistant and go2rtc simultaneously.
 If you are using Home Assistant, I recommend pairing devices with it; it will give you more options.
 
-You can pair device with go2rtc on the HomeKit page. If you can't see your devices, reload the page. 
+You can pair device with go2rtc on the HomeKit page. If you can't see your devices, reload the page.
 Also, try rebooting your HomeKit device (power off). If you still can't see it, you have a problem with mDNS.
 
 If you see a device but it does not have a pairing button, it is paired to some ecosystem (Apple Home, Home Assistant, HomeBridge, etc.). You need to delete the device from that ecosystem, and it will be available for pairing. If you cannot unpair the device, you will have to reset it.

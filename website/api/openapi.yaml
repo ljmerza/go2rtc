@@ -838,7 +838,7 @@ paths:
       tags: [ Discovery ]
       responses:
         "200": { $ref: "#/components/responses/discovery" }
-  
+
   /api/ffmpeg/hardware:
     get:
       summary: FFmpeg hardware transcoding discovery
@@ -846,21 +846,21 @@ paths:
       tags: [ Discovery ]
       responses:
         "200": { $ref: "#/components/responses/discovery" }
-  
+
   /api/v4l2:
     get:
       summary: V4L2 video devices discovery (Linux)
       tags: [ Discovery ]
       responses:
         "200": { $ref: "#/components/responses/discovery" }
-  
+
   /api/alsa:
     get:
       summary: ALSA audio devices discovery (Linux)
       tags: [ Discovery ]
       responses:
         "200": { $ref: "#/components/responses/discovery" }
-  
+
   /api/gopro:
     get:
       summary: GoPro cameras discovery
@@ -923,7 +923,7 @@ paths:
           description: Invalid parameters
         "404":
           description: No cameras found
-  
+
   /api/hass:
     get:
       summary: Home Assistant cameras discovery
@@ -1136,7 +1136,7 @@ paths:
         Upgrade to WebSocket and exchange JSON messages:
         - Request: `{ "type": "...", "value": ... }`
         - Response: `{ "type": "...", "value": ... }`
-        
+
         Supported message types depend on enabled modules (see `api/README.md`).
       tags: [ WebSocket ]
       parameters:

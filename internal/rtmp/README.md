@@ -90,7 +90,7 @@ streams:
 ```
 
 **OBS**
- 
+
 Settings > Stream:
 
 - Service: Custom

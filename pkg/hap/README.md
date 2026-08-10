@@ -7,8 +7,8 @@
 - mDNS name: `MyCamera._hap._tcp.local.`
 - DeviceID - mac-like: `0E:AA:CE:2B:35:71`
 - HomeKit device is described by:
-  - one or more `Accessories` - has `AID` and `Services`  
-  - `Services` - has `IID`, `Type` and `Characters`  
+  - one or more `Accessories` - has `AID` and `Services`
+  - `Services` - has `IID`, `Type` and `Characters`
   - `Characters` - has `IID`, `Type`, `Format` and `Value`
 
 **Client** - HomeKit client (iPhone, iPad, MacBook or opensource library)
@@ -27,12 +27,12 @@
 - ServerID - same as DeviceID (using for Client auth)
 - ServerPublic/ServerPrivate - static random 32 byte keypair
 
-## AAC ELD 
+## AAC ELD
 
 Requires ffmpeg built with `--enable-libfdk-aac`
 
 ```
--acodec libfdk_aac -aprofile aac_eld 
+-acodec libfdk_aac -aprofile aac_eld
 ```
 
 | SampleRate | RTPTime | constantDuration   | objectType   |
