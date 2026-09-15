@@ -41,7 +41,7 @@ Core options:
 The tracked [`go2rtc.example.yaml`](../../go2rtc.example.yaml) contains a
 recommended PLAF203 configuration. Experimental ACK, stream-control, trace, and
 capture options are documented in the
-[Petlibro debugging guide](../../docs/PETLIBRO_DEBUGGING.md).
+[Petlibro debugging guide](../../../../docs/camera-debugging.md).
 
 ## Discovery
 
@@ -92,5 +92,5 @@ assembler, ACK, and bootstrap tests live beside the implementation in
 [`pkg/petlibro`](../../pkg/petlibro/).
 
 For packet formats, counters, dump replay, and failure diagnosis, see the
-[debugging guide](../../docs/PETLIBRO_DEBUGGING.md). For code structure and
-validation, see the [development guide](../../docs/DEVELOPMENT.md).
+[debugging guide](../../../../docs/camera-debugging.md). For code structure and
+validation, see the [development guide](../../../../docs/camera-development.md).

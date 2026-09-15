@@ -12,7 +12,7 @@ API examples:
 - HLS/TS stream: `http://192.168.1.123:1984/api/stream.m3u8?src=camera1` (H264)
 - HLS/fMP4 stream: `http://192.168.1.123:1984/api/stream.m3u8?src=camera1&mp4` (H264, H265, AAC)
 
-Read more about [codecs filters](../../README.md#codecs-filters).
+Read more about [codec filters in upstream go2rtc](https://github.com/AlexxIT/go2rtc#codecs-filters).
 
 ## Useful links
 

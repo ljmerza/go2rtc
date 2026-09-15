@@ -76,7 +76,7 @@ By default go2rtc provide RTSP-stream with only one first video and only one fir
 - `default_query: "video=h264,h265"` - only one video track (H264 or H265)
 - `default_query: "video&audio=all"` - only one first any video and all audio as separate tracks
 
-Read more about [codecs filters](../../README.md#codecs-filters).
+Read more about [codec filters in upstream go2rtc](https://github.com/AlexxIT/go2rtc#codecs-filters).
 
 ## Streaming ingest
 

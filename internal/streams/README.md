@@ -6,7 +6,7 @@ This core module is responsible for managing the stream list.
 
 [`new in v1.3.0`](https://github.com/AlexxIT/go2rtc/releases/tag/v1.3.0)
 
-go2rtc supports playing audio files (ex. music or [TTS](https://www.home-assistant.io/integrations/#text-to-speech)) and live streams (ex. radio) on cameras with [two-way audio](../../README.md#two-way-audio) support.
+go2rtc supports playing audio files (ex. music or [TTS](https://www.home-assistant.io/integrations/#text-to-speech)) and live streams (ex. radio) on cameras with [two-way audio](https://github.com/AlexxIT/go2rtc#two-way-audio) support.
 
 API example:
 

@@ -17,7 +17,7 @@ This module provides several features:
     - You can use `rotate` param with `90`, `180` or `270` values
     - You can use `scale` param with positive integer values (ex. `scale=4:3`)
 
-Read more about [codecs filters](../../README.md#codecs-filters).
+Read more about [codec filters in upstream go2rtc](https://github.com/AlexxIT/go2rtc#codecs-filters).
 
 **PS.** Rotate and scale params don't use transcoding and change video using metadata.
 

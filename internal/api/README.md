@@ -2,7 +2,9 @@
 
 The HTTP API is the main part for interacting with the application. Default address: `http://localhost:1984/`.
 
-The HTTP API is described in [OpenAPI](../../website/api/openapi.yaml) format. It can be explored in [interactive viewer](https://go2rtc.org/api/). WebSocket API described [here](ws/README.md).
+The HTTP API can be explored in the upstream [interactive viewer](https://go2rtc.org/api/),
+which is generated from go2rtc's OpenAPI description. WebSocket API described
+[here](ws/README.md).
 
 The project's static HTML and JS files are located in the [www](../../www/README.md) folder. An external developer can use them as a basis for integrating go2rtc into their project or for developing a custom web interface for go2rtc.
 
