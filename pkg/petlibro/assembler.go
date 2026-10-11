@@ -256,20 +256,20 @@ func (c *Client) logAVLoss(asm *channelAsm, channel byte, hasTrailer bool, trail
 }
 
 type decodedMedia struct {
-	b1            byte
-	channel       byte
-	subFlag       byte
-	subWire       uint16
-	totalFrags    uint16
-	fragIdx       uint16
-	payloadLen    uint16
-	frameNum      uint32
-	nextFrameLike uint32
-	payload       []byte
-	extraLen      int
-	isAudio       bool
-	isEnd         bool
-	extended      bool
+	b1           byte
+	channel      byte
+	subFlag      byte
+	subWire      uint16
+	totalFrags   uint16
+	fragIdx      uint16
+	payloadLen   uint16
+	frameNum     uint32
+	mediaFrameNo uint32
+	payload      []byte
+	extraLen     int
+	isAudio      bool
+	isEnd        bool
+	extended     bool
 }
 
 func isExtendedMediaFamily(b1 byte) bool {
@@ -283,9 +283,9 @@ func isExtendedMediaFamily(b1 byte) bool {
 
 // decodeExtendedMedia validates the alternate media layout seen in PLAF203
 // plaintext captures. It is eight bytes longer than the original layout and
-// carries 16-bit total/fragment fields. nextFrameLike is deliberately kept
-// unnamed beyond the observed invariant: every retained capture stores
-// frameNum+1 there, including uint32 wrap semantics.
+// carries 16-bit total/fragment fields. Offset 40 is a secondary media-frame
+// counter, not a "next frame" field: audio-enabled captures show it advancing
+// independently from the shared frame number at offset 36.
 func decodeExtendedMedia(inner []byte) (m decodedMedia, reason string, ok bool) {
 	if len(inner) >= 2 {
 		m.b1 = inner[1]
@@ -307,9 +307,9 @@ func decodeExtendedMedia(inner []byte) (m decodedMedia, reason string, ok bool) 
 	m.fragIdx = binary.LittleEndian.Uint16(inner[30:32])
 	m.payloadLen = binary.LittleEndian.Uint16(inner[32:34])
 	m.frameNum = binary.LittleEndian.Uint32(inner[36:40])
-	m.nextFrameLike = binary.LittleEndian.Uint32(inner[40:44])
+	m.mediaFrameNo = binary.LittleEndian.Uint32(inner[40:44])
 
-	if m.channel != innerChKey && m.channel != innerChInter {
+	if m.channel != innerChKey && m.channel != innerChInter && m.channel != innerChAudio {
 		return m, "invalid_channel", false
 	}
 	if m.totalFrags == 0 {
@@ -322,15 +322,14 @@ func decodeExtendedMedia(inner []byte) (m decodedMedia, reason string, ok bool) 
 	if payloadEnd > len(inner) {
 		return m, "payload_overflow", false
 	}
-	if m.nextFrameLike != m.frameNum+1 {
-		return m, "next_frame_incoherent", false
-	}
-
 	m.payload = inner[44:payloadEnd]
 	m.extraLen = len(inner) - payloadEnd
 	_, _, _, hasTrailer := stripFragmentMetadataTrailer(m.payload)
 	switch m.b1 {
 	case 0x08, 0x0c:
+		if m.channel == innerChAudio {
+			return m, "audio_data_family", false
+		}
 		if m.subFlag != 0 {
 			return m, "data_sub_flag", false
 		}
@@ -350,7 +349,12 @@ func decodeExtendedMedia(inner []byte) (m decodedMedia, reason string, ok bool) 
 		if m.fragIdx != 16 {
 			return m, "end_frag_not_16", false
 		}
-		if !hasTrailer {
+		if m.channel == innerChAudio {
+			if m.totalFrags != 1 || len(m.payload) < 2 || m.payload[0] != 0xff || m.payload[1]&0xf6 != 0xf0 {
+				return m, "invalid_audio_payload", false
+			}
+			m.isAudio = true
+		} else if !hasTrailer {
 			return m, "end_missing_frameinfo", false
 		}
 	}
@@ -421,7 +425,7 @@ func (c *Client) traceExtendedMedia(m decodedMedia, accepted bool, reason string
 		Uint16("fragIdx", m.fragIdx).
 		Uint16("payloadLen", m.payloadLen).
 		Uint32("frameNum", m.frameNum).
-		Uint32("nextFrameLike", m.nextFrameLike).
+		Uint32("mediaFrameNo", m.mediaFrameNo).
 		Int("payloadOffset", 44).
 		Int("extraLen", m.extraLen).
 		Str("reason", reason).

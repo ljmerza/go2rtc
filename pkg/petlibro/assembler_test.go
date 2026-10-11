@@ -1,6 +1,7 @@
 package petlibro
 
 import (
+	"bytes"
 	"encoding/binary"
 	"reflect"
 	"testing"
@@ -250,16 +251,16 @@ type fragSpec struct {
 }
 
 type extendedFragSpec struct {
-	b1            byte
-	channel       byte
-	subFlag       byte
-	subWire       uint16
-	totalFrags    uint16
-	fragIdx       uint16
-	frameNum      uint32
-	nextFrameLike uint32
-	payload       []byte
-	extra         []byte
+	b1           byte
+	channel      byte
+	subFlag      byte
+	subWire      uint16
+	totalFrags   uint16
+	fragIdx      uint16
+	frameNum     uint32
+	mediaFrameNo uint32
+	payload      []byte
+	extra        []byte
 }
 
 // makePkt synthesises the post-decryption packet bytes parseDatagram
@@ -297,7 +298,7 @@ func makeExtendedPkt(f extendedFragSpec) []byte {
 	binary.LittleEndian.PutUint16(inner[30:32], f.fragIdx)
 	binary.LittleEndian.PutUint16(inner[32:34], uint16(len(f.payload)))
 	binary.LittleEndian.PutUint32(inner[36:40], f.frameNum)
-	binary.LittleEndian.PutUint32(inner[40:44], f.nextFrameLike)
+	binary.LittleEndian.PutUint32(inner[40:44], f.mediaFrameNo)
 	copy(inner[44:], f.payload)
 	copy(inner[44+len(f.payload):], f.extra)
 
@@ -354,6 +355,34 @@ func TestFirstRuntimeMediaAnchorsRetainedSDSequenceOrigin(t *testing.T) {
 	a, _ := ackFor(t, c)
 	if a.AVBase != uint16(first-1) || a.AVHigh != uint16(first) || len(a.Missing) != 0 {
 		t.Fatalf("anchored ACK=%+v, want base/high 0x818a/0x818b without NACKs", a)
+	}
+}
+
+func TestFirstRuntimeMediaOriginContinuesAcrossWireWrap(t *testing.T) {
+	c := newTestClient(0x4000, "sd")
+	c.avSequenceAnchored = false // bootstrap observed no media beyond 0x3fff
+
+	idr := makeTrailerPayload([]byte{0, 0, 0, 1, 0x65, 0x88}, true, 1, 1000)
+	c.parseDatagram(makePkt(fragSpec{
+		channel: innerChKey, sub17: 0x01, subWire: 0xfffe,
+		totalFrags: 1, fragIdx: 0, paylen: uint16(len(idr)), frameNum: 1,
+		payload: idr,
+	}))
+	inter := makeTrailerPayload([]byte{0, 0, 0, 1, 0x61, 0x99}, false, 1, 1040)
+	for i, wire := range []uint16{0xffff, 0x0000} {
+		c.parseDatagram(makePkt(fragSpec{
+			channel: innerChInter, sub17: 0x01, subWire: wire,
+			totalFrags: 1, fragIdx: 0, paylen: uint16(len(inter)), frameNum: uint32(i + 2),
+			payload: inter,
+		}))
+	}
+
+	if got := c.contiguousAckExt(); got != 0x10000 {
+		t.Fatalf("ACK watermark=0x%x, want wrapped extended sequence 0x10000", got)
+	}
+	a, _ := ackFor(t, c)
+	if a.AVBase != 0xfffd || a.AVHigh != 0 || len(a.Missing) != 0 {
+		t.Fatalf("wrapped retained-origin ACK=%+v, want base/high 0xfffd/0 without NACKs", a)
 	}
 }
 
@@ -583,12 +612,12 @@ func TestExtendedMediaHeaderAssemblyAndACK(t *testing.T) {
 	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
 		b1: 0x08, channel: innerChKey, subFlag: 0,
 		subWire: 0x4000, totalFrags: 2, fragIdx: 0,
-		frameNum: 10, nextFrameLike: 11, payload: mainData,
+		frameNum: 10, mediaFrameNo: 11, payload: mainData,
 	}))
 	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
 		b1: 0x09, channel: innerChKey, subFlag: 1,
 		subWire: 0x4001, totalFrags: 2, fragIdx: 16,
-		frameNum: 10, nextFrameLike: 11, payload: mainEnd,
+		frameNum: 10, mediaFrameNo: 11, payload: mainEnd,
 	}))
 
 	subData := []byte{0, 0, 0, 1, 0x41, 0x44}
@@ -596,12 +625,12 @@ func TestExtendedMediaHeaderAssemblyAndACK(t *testing.T) {
 	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
 		b1: 0x0c, channel: innerChInter, subFlag: 0,
 		subWire: 0x4002, totalFrags: 2, fragIdx: 0,
-		frameNum: 11, nextFrameLike: 12, payload: subData,
+		frameNum: 11, mediaFrameNo: 12, payload: subData,
 	}))
 	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
 		b1: 0x0d, channel: innerChInter, subFlag: 1,
 		subWire: 0x4003, totalFrags: 2, fragIdx: 16,
-		frameNum: 11, nextFrameLike: 12, payload: subEnd,
+		frameNum: 11, mediaFrameNo: 12, payload: subEnd,
 	}))
 
 	packets := drainAll(c)
@@ -642,13 +671,13 @@ func TestExtendedMediaRejectDoesNotACK(t *testing.T) {
 
 	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
 		b1: 0x08, channel: innerChKey, subFlag: 0,
-		subWire: 0x4000, totalFrags: 2, fragIdx: 0,
-		frameNum: 10, nextFrameLike: 99, payload: []byte{1, 2, 3},
+		subWire: 0x4000, totalFrags: 2, fragIdx: 2,
+		frameNum: 10, mediaFrameNo: 99, payload: []byte{1, 2, 3},
 	}))
 	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
 		b1: 0x0d, channel: innerChInter, subFlag: 1,
 		subWire: 0x4001, totalFrags: 1, fragIdx: 16,
-		frameNum: 11, nextFrameLike: 12, payload: []byte{1, 2, 3},
+		frameNum: 11, mediaFrameNo: 12, payload: []byte{1, 2, 3},
 	}))
 
 	if got := c.stats.extendedMediaCandidates.Load(); got != 2 {
@@ -668,6 +697,52 @@ func TestExtendedMediaRejectDoesNotACK(t *testing.T) {
 	}
 	if got := c.contiguousAckExt(); got != 0x3fff {
 		t.Fatalf("rejected packet advanced ACK watermark to 0x%x", got)
+	}
+}
+
+func TestExtendedMediaAudioAndVideoRemainContiguous(t *testing.T) {
+	c := newTestClient(0x4000, "sd")
+	audio := []byte{0xff, 0xf1, 0x50, 0x80, 0x01, 0x7f, 0xfc}
+	video := []byte{0, 0, 0, 1, 0x61, 0x88, 0x99}
+	videoWire := makeTrailerPayload(video, false, 1, 1040)
+
+	// Physical AAC captures interleave a shared frame number at offset 36 with
+	// an independently advancing media-family counter at offset 40. Neither
+	// channel is required to have the old frameNum+1 relationship.
+	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
+		b1: 0x09, channel: innerChAudio, subFlag: 1,
+		subWire: 0x4000, totalFrags: 1, fragIdx: 16,
+		frameNum: 23, mediaFrameNo: 16, payload: audio,
+	}))
+	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
+		b1: 0x0d, channel: innerChAudio, subFlag: 1,
+		subWire: 0x4001, totalFrags: 1, fragIdx: 16,
+		frameNum: 66, mediaFrameNo: 43, payload: audio,
+	}))
+	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
+		b1: 0x09, channel: innerChInter, subFlag: 1,
+		subWire: 0x4002, totalFrags: 1, fragIdx: 16,
+		frameNum: 37, mediaFrameNo: 14, payload: videoWire,
+	}))
+
+	packets := drainAll(c)
+	if len(packets) != 3 {
+		t.Fatalf("emitted %d packets, want two AAC units followed by H.264", len(packets))
+	}
+	if packets[0].Codec != CodecAACADTS || packets[1].Codec != CodecAACADTS || packets[2].Codec != CodecH264 {
+		t.Fatalf("unexpected codecs: first=%d second=%d third=%d", packets[0].Codec, packets[1].Codec, packets[2].Codec)
+	}
+	if !bytes.Equal(packets[0].Payload, audio) || !bytes.Equal(packets[1].Payload, audio) || !bytes.Equal(packets[2].Payload, video) {
+		t.Fatal("extended complete-unit payload changed during assembly")
+	}
+	if !packets[2].HasCameraTime {
+		t.Fatal("extended video FRAMEINFO timestamp was not preserved")
+	}
+	if got := c.contiguousAckExt(); got != 0x4002 {
+		t.Fatalf("ACK watermark=0x%x, want 0x4002", got)
+	}
+	if got := c.stats.ackSeenPending.Load(); got != 0 {
+		t.Fatalf("ACK pending=%d, want 0", got)
 	}
 }
 

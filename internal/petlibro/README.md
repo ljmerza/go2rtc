@@ -77,9 +77,10 @@ LAN_SEARCH3 -> KNOCK2 -> LOGIN A/B -> stream/bootstrap IOCtrls
 
 The parser supports both the normal 36-byte media header and the alternate
 44-byte media layout used by packet families `0c08`, `0c09`, `0c0c`, and
-`0c0d`. Both layouts enter one assembler after structural validation. The
-observed key/IDR, inter/P, and audio families retain independent frame state;
-these labels describe packet behavior rather than official SDK terminology.
+`0c0d`. Both layouts enter one assembler after structural validation, including
+the channel-`0x03` ADTS units observed only while audio is active. The observed
+key/IDR, inter/P, and audio families retain independent frame state; these
+labels describe packet behavior rather than official SDK terminology.
 
 Receive ACK state is independent from the assembler output cursor. The
 contiguous ACK watermark advances only for wire sequences actually received;

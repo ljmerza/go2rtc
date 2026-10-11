@@ -89,3 +89,14 @@ func (c *timestampContinuity) wrap(next core.HandlerFunc) core.HandlerFunc {
 		next(&clone)
 	}
 }
+
+// replaceReceiver moves downstream children while holding the same lock used
+// by old- and new-generation callbacks. core.Receiver.Replace protects its
+// writes to the child slices, but Receiver.Input reads those slices without the
+// node mutex; serializing the transfer here prevents replacement from racing an
+// in-flight synchronous forward.
+func (c *timestampContinuity) replaceReceiver(source, target *core.Receiver) {
+	c.mu.Lock()
+	source.Replace(target)
+	c.mu.Unlock()
+}

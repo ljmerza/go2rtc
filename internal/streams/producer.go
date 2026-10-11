@@ -277,7 +277,7 @@ func (p *Producer) reconnect(workerID, retry int) {
 				clock := p.clocks[i]
 				track.Input = clock.wrap(track.Input)
 
-				receiver.Replace(track)
+				clock.replaceReceiver(receiver, track)
 				p.receivers[i] = track
 				break
 			}

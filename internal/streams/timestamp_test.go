@@ -1,6 +1,7 @@
 package streams
 
 import (
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -44,6 +45,35 @@ func TestTimestampContinuityAcrossProducerGeneration(t *testing.T) {
 			t.Fatalf("timestamp[%d]=%d, want %d (all=%v)", i, got[i], want[i], got)
 		}
 	}
+}
+
+func TestTimestampContinuityReceiverGraphReplacementRace(t *testing.T) {
+	clock := new(timestampContinuity)
+	oldTrack := core.NewReceiver(nil, &core.Codec{Name: core.CodecH264})
+	oldTrack.Input = clock.wrap(oldTrack.Input)
+	newTrack := core.NewReceiver(nil, &core.Codec{Name: core.CodecH264})
+	newTrack.Input = clock.wrap(newTrack.Input)
+
+	child := &core.Node{Input: func(*core.Packet) {
+		for range 100 {
+			runtime.Gosched()
+		}
+	}}
+	oldTrack.AppendChild(child)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 1000 {
+			oldTrack.Input(&core.Packet{Header: rtp.Header{Timestamp: 90000}})
+			newTrack.Input(&core.Packet{Header: rtp.Header{Timestamp: 90000}})
+		}
+	}()
+	for range 1000 {
+		clock.replaceReceiver(oldTrack, newTrack)
+		clock.replaceReceiver(newTrack, oldTrack)
+	}
+	<-done
 }
 
 func TestTimestampContinuityPreservesSourceRollover(t *testing.T) {

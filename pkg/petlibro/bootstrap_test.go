@@ -22,6 +22,23 @@ func TestBootstrapIOCtrlOrder(t *testing.T) {
 	}
 }
 
+func TestBootstrapAudioStartsAfterVideo(t *testing.T) {
+	cmds := (&Client{audio: true}).bootstrapIOCtrls(qualityHD)
+	if len(cmds) < 2 {
+		t.Fatalf("audio bootstrap has %d commands", len(cmds))
+	}
+	start, audio := cmds[len(cmds)-2], cmds[len(cmds)-1]
+	if got := binary.LittleEndian.Uint32(start.payload); got != ioctlStart || !start.startsMedia {
+		t.Fatalf("penultimate command ID=0x%04x startsMedia=%t, want IPCAM_START", got, start.startsMedia)
+	}
+	if got := binary.LittleEndian.Uint32(audio.payload); got != ioctlAudioOn {
+		t.Fatalf("final command ID=0x%04x, want AUDIOSTART 0x%04x", got, ioctlAudioOn)
+	}
+	if len(audio.payload) != 12 || audio.payload[4] != 1 {
+		t.Fatalf("AUDIOSTART payload=% x, want enabled channel 1", audio.payload)
+	}
+}
+
 func TestBootstrapAVAPIPayloadShapes(t *testing.T) {
 	cmds := (&Client{}).bootstrapIOCtrls(qualityHD)
 

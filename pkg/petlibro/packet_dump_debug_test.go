@@ -158,7 +158,7 @@ func TestPacketSummaryClassifiers(t *testing.T) {
 	extended := makeExtendedPkt(extendedFragSpec{
 		b1: 0x08, channel: innerChKey, subFlag: 0,
 		subWire: 0x4000, totalFrags: 2, fragIdx: 0,
-		frameNum: 1, nextFrameLike: 2, payload: []byte{1, 2, 3},
+		frameNum: 1, mediaFrameNo: 2, payload: []byte{1, 2, 3},
 	})
 	class, sub, channel, frame, media := classifyD2C(extended)
 	if class != "extended_media_data_ch0x05_b1_0x08" || !media || sub != 0x4000 || channel != innerChKey || frame != 1 {
