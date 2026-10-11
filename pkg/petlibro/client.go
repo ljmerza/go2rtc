@@ -115,11 +115,16 @@ type Client struct {
 	innerMu  sync.Mutex // serializes live IOCtrl counters and shutdown
 
 	// in-order reassembly
-	wrap           wrapSeq
-	avBuffer       map[uint64]*pendingFrag
-	avNextExt      uint64
-	avHighExt      uint64
-	avNextObserved atomic.Uint64 // synchronized mirror for maintenance ACK diagnostics
+	wrap      wrapSeq
+	avBuffer  map[uint64]*pendingFrag
+	avNextExt uint64
+	avHighExt uint64
+	// avSequenceAnchored is true once bootstrap or the first runtime video
+	// packet has established the physical session's AV sequence origin.
+	// Some SD sessions retain a camera-global counter instead of restarting at
+	// 0x4000, so a bootstrap with no media cannot always provide that origin.
+	avSequenceAnchored bool
+	avNextObserved     atomic.Uint64 // synchronized mirror for maintenance ACK diagnostics
 
 	// Receive-side ACK tracking is deliberately independent from the
 	// assembler cursor. forceDrain may skip a missing packet so output
@@ -169,7 +174,7 @@ type Client struct {
 	tracePackets   bool
 	keyAsm         channelAsm // key/IDR-family assembly state for marker 0x05
 	interAsm       channelAsm // inter-frame assembly state for marker 0x07
-	gopPoisoned    bool       // strict mode only: a fragment was lost in this GOP — drop P-frames until next clean IDR
+	gopPoisoned    bool       // a reference AU was dropped — suppress dependent P-frames until the next emitted IDR
 
 	stats         counters
 	prevStats     countersSnapshot
@@ -215,7 +220,7 @@ type counters struct {
 	vidFrags     atomic.Uint64 // video fragments (ch=0x05 + ch=0x07) reaching emit
 	vidFramesIn  atomic.Uint64 // distinct frame_num values seen on video channel
 	vidFramesOut atomic.Uint64 // AUs successfully queued to consumers
-	vidDropped   atomic.Uint64 // AUs discarded because a frag_idx gap was detected
+	vidDropped   atomic.Uint64 // video AUs discarded by loss or GOP-continuity policy
 	fragSkips    atomic.Uint64 // count of frag_idx-skip events (fragments lost on the wire)
 	fragsLost    atomic.Uint64 // total fragments lost (sum of frag_idx gap sizes)
 	forceDrains  atomic.Uint64 // times forceDrain ran with buffered packets to flush
@@ -234,6 +239,7 @@ type counters struct {
 	zeroDataHardDrop           atomic.Uint64
 	strictIDRDrop              atomic.Uint64
 	strictPDrop                atomic.Uint64
+	gopRecoveryDrop            atomic.Uint64
 	forceDrainFlush            atomic.Uint64
 	forceDrainEntries          atomic.Uint64
 	deferredDrop               atomic.Uint64 // AV datagrams arriving after avNextExt already advanced
@@ -312,6 +318,7 @@ type countersSnapshot struct {
 	zeroDataHardDrop           uint64
 	strictIDRDrop              uint64
 	strictPDrop                uint64
+	gopRecoveryDrop            uint64
 	forceDrainFlush            uint64
 	forceDrainEntries          uint64
 	deferredDrop               uint64
@@ -385,6 +392,7 @@ func (c *counters) snapshot() countersSnapshot {
 		zeroDataHardDrop:           c.zeroDataHardDrop.Load(),
 		strictIDRDrop:              c.strictIDRDrop.Load(),
 		strictPDrop:                c.strictPDrop.Load(),
+		gopRecoveryDrop:            c.gopRecoveryDrop.Load(),
 		forceDrainFlush:            c.forceDrainFlush.Load(),
 		forceDrainEntries:          c.forceDrainEntries.Load(),
 		deferredDrop:               c.deferredDrop.Load(),

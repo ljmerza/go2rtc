@@ -110,6 +110,8 @@ func (c *Conn) Stop() (err error) {
 }
 
 func (c *Conn) MarshalJSON() ([]byte, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	return json.Marshal(c.Connection)
 }
 

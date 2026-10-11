@@ -1,6 +1,7 @@
 package rtsp
 
 import (
+	"io"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/aac"
@@ -76,6 +77,7 @@ const (
 func (c *Conn) packetWriter(codec *core.Codec, channel, payloadType uint8) core.HandlerFunc {
 	var buf []byte
 	var n int
+	var writeFailed bool
 
 	video := codec.IsVideo()
 	if video {
@@ -87,13 +89,19 @@ func (c *Conn) packetWriter(codec *core.Codec, channel, payloadType uint8) core.
 	flushBuf := func() {
 		//log.Printf("[rtsp] channel:%2d write_size:%6d buffer_size:%6d", channel, n, len(buf))
 		if err := c.writeInterleavedData(buf[:n]); err != nil {
-			c.Send += n
+			// The packet handler cannot return an error to the RTSP server read
+			// loop. Closing the transport makes that loop terminate and remove
+			// the failed consumer instead of silently discarding every later AU.
+			writeFailed = true
+			_ = c.conn.Close()
+		} else {
+			c.addSend(n)
 		}
 		n = 0
 	}
 
 	handlerFunc := func(packet *rtp.Packet) {
-		if c.state == StateNone {
+		if c.state == StateNone || writeFailed {
 			return
 		}
 
@@ -120,6 +128,9 @@ func (c *Conn) packetWriter(codec *core.Codec, channel, payloadType uint8) core.
 				buf = append(buf, make([]byte, l)...) // double buffer size
 			} else {
 				flushBuf()
+				if writeFailed {
+					return
+				}
 			}
 		}
 
@@ -178,7 +189,10 @@ func (c *Conn) packetWriter(codec *core.Codec, channel, payloadType uint8) core.
 func (c *Conn) writeInterleavedData(data []byte) error {
 	if c.Transport != "udp" {
 		_ = c.conn.SetWriteDeadline(time.Now().Add(Timeout))
-		_, err := c.conn.Write(data)
+		n, err := c.conn.Write(data)
+		if err == nil && n != len(data) {
+			err = io.ErrShortWrite
+		}
 		return err
 	}
 

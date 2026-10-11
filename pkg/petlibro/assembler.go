@@ -590,10 +590,49 @@ func (c *Client) parseDatagram(pkt []byte) {
 	default:
 		c.stats.otherFrags.Add(1)
 	}
+	isVideo := !media.isAudio && (media.channel == innerChKey || media.channel == innerChInter)
 
 	// No filter by subWire — audio fragments legitimately arrive at
 	// wire values < 0x4000 alongside the high AV indices, and dropping
-	// those would silence the audio stream.
+	// those after video origin selection would silence the audio stream.
+	// The HD stream observed in official captures starts at 0x4000 after the
+	// bootstrap's 0x3fff AV-ready report. The physical PLAF203's SD path can
+	// instead retain a later camera-global AV counter. If bootstrap saw no AV
+	// media, treating that retained origin as thousands of missing packets
+	// permanently stalls the receive watermark and makes the camera repeatedly
+	// service NACKs for packets that never belonged to this session.
+	//
+	// Only video can establish this origin. AAC may arrive first and uses low
+	// sequence values, including an alternate layout carried on channel 0x07;
+	// interpreting it as retained video state would wrap the receive window.
+	// Anchor only a first-video jump larger than the complete NACK capacity.
+	// Smaller gaps remain ordinary loss/reordering and must still be reported;
+	// an origin actually observed during bootstrap is never rewritten.
+	// Before that origin is known, audio cannot be projected into the shared
+	// extended receive window safely. Ignore only these startup packets; video
+	// readiness precedes audio handoff and later AAC remains fully tracked.
+	if !c.avSequenceAnchored && !isVideo {
+		c.stats.sequenceSeenButUnhandled.Add(1)
+		return
+	}
+	if !c.avSequenceAnchored && isVideo {
+		c.avSequenceAnchored = true
+		forward := uint16(media.subWire - uint16(c.avNextExt))
+		if uint64(forward) > maxTransportNACKs {
+			firstExt := c.avNextExt + uint64(forward)
+			c.wrap = wrapSeq{ext: firstExt}
+			c.avNextExt = firstExt
+			c.avHighExt = firstExt - 1
+			c.avNextObserved.Store(firstExt)
+			c.initACKTracking(firstExt - 1)
+			if c.verbose {
+				log.Debug().Str("physical_session_id", c.sessionID).
+					Uint16("wire_sequence", media.subWire).Uint64("sequence_origin", firstExt).
+					Msg("petlibro runtime media established retained AV sequence origin")
+			}
+		}
+	}
+
 	subExt, ok := c.wrap.extend(media.subWire)
 	if !ok {
 		// Wire counter landed before the sequence start — most likely
@@ -818,9 +857,9 @@ func (c *Client) emit(e *pendingFrag) {
 				c.stats.fragSkips.Add(1)
 				c.stats.fragsLost.Add(1)
 				c.stats.vidDropped.Add(1)
-				if c.strict {
-					c.gopPoisoned = true
-				}
+				// PLAF203 P pictures are reference pictures. Once one is
+				// discarded, later P pictures are not a continuous GOP.
+				c.gopPoisoned = true
 				asm.reset()
 			}
 		}
@@ -902,7 +941,7 @@ func (c *Client) emit(e *pendingFrag) {
 		isKeyframe := e.channel == innerChKey
 		c.debugFrameEvent("zero_data_hard_drop", e, asm, onlineNum, hasTrailer, &isKeyframe)
 		asm.reset()
-		if c.strict && e.channel == innerChKey {
+		if e.channel == innerChInter || (c.strict && e.channel == innerChKey) {
 			c.gopPoisoned = true
 		}
 		return
@@ -942,30 +981,33 @@ func (c *Client) emit(e *pendingFrag) {
 		//     artefacts at the hole location are far less disruptive
 		//     than the multi-second freeze that results from dropping
 		//     the IDR and waiting for the next clean one.
-		//   * P-frame on ch=0x07: DROP.  A truncated P-frame slice
+		//   * P-frame on ch=0x07: DROP. A truncated P-frame slice
 		//     causes the decoder to mis-parse the bitstream mid-way
 		//     and the resulting errors ("mb_type 533 in I slice too
 		//     large", "P sub_mb_type 11 out of range", etc) cascade
 		//     into every subsequent P-frame in the GOP via reference
-		//     prediction.  The decoder recovers automatically at the
-		//     next clean P-frame (P-frames only reference the IDR,
-		//     not each other for slice-data validity), so dropping
-		//     ONE gapped P-frame loses one frame; emitting it loses
-		//     the rest of the GOP to cascading decoder errors.
+		//     prediction. Hardware captures show PLAF203 P slices use
+		//     nal_ref_idc=3, so later P pictures cannot be assumed to
+		//     reference only the IDR. Suppress them until the next IDR.
 		c.stats.vidDropped.Add(1)
 		if e.channel != innerChKey {
+			c.gopPoisoned = true
 			return
 		}
 		isKeyframe := true
 		c.debugFrameEvent("gapped_idr_emit", e, &asmState, onlineNum, hasTrailer, &isKeyframe)
 	}
-	// In strict mode only, drop P-frames in a poisoned GOP until the
-	// next clean IDR.  In non-strict (default), let them through.
-	if c.strict && c.gopPoisoned && !wasKey {
+	// Dropping a reference P picture breaks this device's prediction chain.
+	// This continuity rule applies in both modes; strict only decides whether
+	// a damaged IDR may be emitted as the new GOP head.
+	if c.gopPoisoned && !wasKey {
 		c.stats.vidDropped.Add(1)
-		c.stats.strictPDrop.Add(1)
+		c.stats.gopRecoveryDrop.Add(1)
+		if c.strict {
+			c.stats.strictPDrop.Add(1)
+		}
 		isKeyframe := false
-		c.debugFrameEvent("strict_gop_poisoned_drop", e, &asmState, onlineNum, hasTrailer, &isKeyframe)
+		c.debugFrameEvent("gop_reference_recovery_drop", e, &asmState, onlineNum, hasTrailer, &isKeyframe)
 		return
 	}
 	c.emitAU(au, e.frameNum, e.channel, onlineNum, frameTs, hasTrailer)
@@ -1048,15 +1090,18 @@ func (c *Client) emitAU(au []byte, cameraFrameNum uint32, channel, onlineNum byt
 	if isKey {
 		// A fresh IDR clears the GOP-poisoned state.
 		c.gopPoisoned = false
-	} else if c.strict && c.gopPoisoned {
-		// Strict only: drop P-frames referencing a dropped IDR.
-		// Non-strict lets the decoder conceal.
+	} else if c.gopPoisoned {
+		// The PLAF203 emits reference P pictures. Do not knowingly hand
+		// consumers a prediction chain with a missing reference AU.
 		c.stats.vidDropped.Add(1)
-		c.stats.strictPDrop.Add(1)
+		c.stats.gopRecoveryDrop.Add(1)
+		if c.strict {
+			c.stats.strictPDrop.Add(1)
+		}
 		if c.verbose && c.traceFrag {
 			log.Trace().
 				Str("physical_session_id", c.sessionID).
-				Str("reason", "strict_gop_poisoned_drop").
+				Str("reason", "gop_reference_recovery_drop").
 				Str("quality", c.quality).
 				Bool("strict", c.strict).
 				Uint8("channel", 0).
@@ -1074,7 +1119,7 @@ func (c *Client) emitAU(au []byte, cameraFrameNum uint32, channel, onlineNum byt
 		return
 	}
 
-	c.queuePacket(&Packet{
+	queued := c.queuePacket(&Packet{
 		Codec:         CodecH264,
 		Payload:       au,
 		FrameNo:       c.emitSeq,
@@ -1086,7 +1131,13 @@ func (c *Client) emitAU(au []byte, cameraFrameNum uint32, channel, onlineNum byt
 		IsKeyframe:    isKey,
 	})
 	c.emitSeq++
-	c.stats.vidFramesOut.Add(1)
+	if queued {
+		c.stats.vidFramesOut.Add(1)
+	} else {
+		// A queue drop is an AU-level hole. Whether the dropped AU was an
+		// IDR or a reference P picture, dependent P pictures are unsafe.
+		c.gopPoisoned = true
+	}
 }
 
 // stripFragmentMetadataTrailer removes the 16-byte per-frame metadata
@@ -1176,18 +1227,20 @@ func annexbNAL(b []byte, want byte) []byte {
 // queuePacket hands an assembled Packet to the consumer.  Selecting on
 // done first means Close cannot race the send onto the now-closed
 // frames channel — recover() and a separate closed-bool aren't needed.
-func (c *Client) queuePacket(p *Packet) {
+func (c *Client) queuePacket(p *Packet) bool {
 	select {
 	case <-c.done:
-		return
+		return false
 	default:
 	}
 	select {
 	case <-c.done:
-		return
+		return false
 	case c.frames <- p:
+		return true
 	default:
 		c.stats.emitDrops.Add(1)
+		return false
 	}
 }
 

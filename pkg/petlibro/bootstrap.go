@@ -38,11 +38,19 @@ func (c *Client) debugIOCtrlResponse(inner []byte) {
 	if paylen < 4 || 36+paylen > len(inner) {
 		return
 	}
-	body := xorBody(inner[36 : 36+paylen])
+	// D2C reliable-control bodies are already plain after outer transport
+	// decoding. xorBody is only part of the C2D innerData construction path.
+	body := inner[36 : 36+paylen]
 	id := binary.LittleEndian.Uint32(body)
-	if id == ioctlGetStreamCtrlResp || id == ioctlSetStreamCtrlResp {
-		log.Trace().Str("physical_session_id", c.sessionID).Uint32("ioctl", id).
-			Int("body_length", len(body)).Msg("petlibro STREAMCTRL response received")
+	if id == ioctlPetlibroStreamCtrlResp || id == ioctlPetlibroQueryResp ||
+		id == ioctlGetAudioOutFormatResp {
+		event := log.Trace().Str("physical_session_id", c.sessionID).Uint32("ioctl", id).
+			Uint16("message_sequence", binary.LittleEndian.Uint16(inner[18:20])).
+			Int("body_length", len(body))
+		if len(body) >= 8 {
+			event = event.Uint32("response_value", binary.LittleEndian.Uint32(body[4:8]))
+		}
+		event.Msg("petlibro IOCtrl response received")
 	}
 }
 
@@ -207,6 +215,7 @@ func (c *Client) bootstrap() error {
 	}
 	c.avNextExt = c.wrap.ext
 	c.avHighExt = c.wrap.ext - 1
+	c.avSequenceAnchored = bootstrapAVMax != 0x3FFF
 	c.avBuffer = make(map[uint64]*pendingFrag)
 	c.initACKTracking(uint64(bootstrapAVMax))
 	if c.verbose {

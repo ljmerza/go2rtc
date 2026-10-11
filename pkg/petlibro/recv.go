@@ -435,6 +435,7 @@ func (c *Client) dumpStats() {
 			zeroDataHardDrop:           cur.zeroDataHardDrop - c.prevStats.zeroDataHardDrop,
 			strictIDRDrop:              cur.strictIDRDrop - c.prevStats.strictIDRDrop,
 			strictPDrop:                cur.strictPDrop - c.prevStats.strictPDrop,
+			gopRecoveryDrop:            cur.gopRecoveryDrop - c.prevStats.gopRecoveryDrop,
 			forceDrainFlush:            cur.forceDrainFlush - c.prevStats.forceDrainFlush,
 			forceDrainEntries:          cur.forceDrainEntries - c.prevStats.forceDrainEntries,
 			deferredDrop:               cur.deferredDrop - c.prevStats.deferredDrop,
@@ -515,12 +516,12 @@ func (c *Client) dumpStats() {
 		Float64("receive_kib_per_second", float64(delta.bytesIn)/1024/seconds).
 		Float64("packets_per_second", float64(delta.pktsIn)/seconds).
 		Float64("video_frames_per_second", float64(delta.vidFramesOut)/seconds).
-		Uint64("packets_received", delta.pktsIn).Uint64("video_frames_assembled", delta.vidFramesOut).
+		Uint64("packets_received", delta.pktsIn).Uint64("video_frames_queued", delta.vidFramesOut).
 		Uint64("video_frames_dropped", delta.vidDropped).Uint64("missing_fragments", delta.missingFragmentsTotal).
 		Uint64("reader_queue_drops", delta.readerDrops).Uint64("output_queue_drops", delta.emitDrops).
 		Uint64("ack_pending", cur.ackSeenPending).Uint64("ack_nacks", cur.ackNACKCount).
 		Msg("petlibro transport health")
-	log.Trace().Str("physical_session_id", c.sessionID).Msgf("petlibro transport diagnostics: in=%d pkts (%d KiB) families: key=%d inter=%d audio=%d other=%d | video: %d frames in -> %d out (drop %d) | loss: frames=%d idr=%d p=%d missing=%d maxFrame=%d | frag skips: %d (%d frags lost) | forceDrain: %d | qDrops reader=%d emit=%d | reasons: fragIdxGap=%d frameNumJumpKey=%d frameNumJumpInter=%d expectedDataShortfall=%d zeroDataHardDrop=%d strictIDRDrop=%d strictPDrop=%d forceDrainFlush=%d forceDrainEntries=%d deferredDrop=%d | mediaHeaders: normal=%d extendedMedia parsed=%d rejected=%d data=%d end=%d rare=%d unknown0c08=%d unknown0c0d=%d candidates=%d seqAssembled=%d seqUnhandled=%d | frameinfo: codec=0x%04x flag=%d onlineNum=%d changes=%d unexpected=%d | transport: ackRx=%d probeRx=%d responseTx=%d feedbackRx=%d watermark=0x%x high=0x%x avNext=0x%x pending=%d ranges=%d nacks=%d overflow=%d advanced=%d duplicate=%d ackTx=%d base=0x%04x highWire=0x%04x reliable=0x%04x sendCount=0x%04x",
+	log.Trace().Str("physical_session_id", c.sessionID).Msgf("petlibro transport diagnostics: in=%d pkts (%d KiB) families: key=%d inter=%d audio=%d other=%d | video: %d frames in -> %d out (drop %d) | loss: frames=%d idr=%d p=%d missing=%d maxFrame=%d | frag skips: %d (%d frags lost) | forceDrain: %d | qDrops reader=%d emit=%d | reasons: fragIdxGap=%d frameNumJumpKey=%d frameNumJumpInter=%d expectedDataShortfall=%d zeroDataHardDrop=%d strictIDRDrop=%d strictPDrop=%d gopRecoveryDrop=%d forceDrainFlush=%d forceDrainEntries=%d deferredDrop=%d | mediaHeaders: normal=%d extendedMedia parsed=%d rejected=%d data=%d end=%d rare=%d unknown0c08=%d unknown0c0d=%d candidates=%d seqAssembled=%d seqUnhandled=%d | frameinfo: codec=0x%04x flag=%d onlineNum=%d changes=%d unexpected=%d | transport: ackRx=%d probeRx=%d responseTx=%d feedbackRx=%d watermark=0x%x high=0x%x avNext=0x%x pending=%d ranges=%d nacks=%d overflow=%d advanced=%d duplicate=%d ackTx=%d base=0x%04x highWire=0x%04x reliable=0x%04x sendCount=0x%04x",
 		delta.pktsIn, delta.bytesIn/1024,
 		delta.keyFrags, delta.interFrags, delta.audioFrags, delta.otherFrags,
 		delta.vidFramesIn, delta.vidFramesOut, delta.vidDropped,
@@ -529,7 +530,7 @@ func (c *Client) dumpStats() {
 		delta.readerDrops, delta.emitDrops,
 		delta.fragIdxGap, delta.frameNumJumpKey, delta.frameNumJumpInter,
 		delta.expectedDataShortfall, delta.zeroDataHardDrop,
-		delta.strictIDRDrop, delta.strictPDrop, delta.forceDrainFlush,
+		delta.strictIDRDrop, delta.strictPDrop, delta.gopRecoveryDrop, delta.forceDrainFlush,
 		delta.forceDrainEntries, delta.deferredDrop,
 		delta.normalMediaPackets, delta.extendedMediaParsed, delta.extendedMediaRejected,
 		delta.extendedMediaDataPackets, delta.extendedMediaEndPackets, delta.extendedMediaRarePackets,

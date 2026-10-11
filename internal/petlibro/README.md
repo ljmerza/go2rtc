@@ -34,7 +34,7 @@ Core options:
 | `subnet` | no | local broadcast | Additional IPv4 CIDR used for discovery; may be repeated |
 | `quality` | no | `hd` | Requests and selects `hd` or `sd` video |
 | `audio` | no | `false` | Requests AAC audio when `true` or `1` |
-| `strict` | no | `false` | Drops damaged IDRs and dependent GOP frames instead of emitting a gapped IDR |
+| `strict` | no | `false` | Drops damaged IDRs instead of emitting them; reference-P continuity recovery applies in either mode |
 | `verbose` | no | `false` | Enables compact bootstrap, readiness, codec, and health diagnostics |
 
 The tracked [`go2rtc.example.yaml`](../../go2rtc.example.yaml) contains a

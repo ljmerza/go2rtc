@@ -2,6 +2,7 @@ package petlibro
 
 import (
 	"encoding/binary"
+	"reflect"
 	"testing"
 )
 
@@ -326,8 +327,228 @@ func newTestClient(firstSubWire uint16, quality string) *Client {
 	}
 	c.avNextExt = c.wrap.ext
 	c.avHighExt = c.wrap.ext - 1
+	c.avSequenceAnchored = true
 	c.initACKTracking(c.wrap.ext - 1)
 	return c
+}
+
+func TestFirstRuntimeMediaAnchorsRetainedSDSequenceOrigin(t *testing.T) {
+	c := newTestClient(0x4000, "sd")
+	c.avSequenceAnchored = false // bootstrap observed no media beyond 0x3fff
+
+	payload := append([]byte{0, 0, 0, 1, 0x65, 0x88}, make([]byte, 16)...)
+	payload = makeTrailerPayload(payload, true, 0x01, 1000)
+	c.parseDatagram(makePkt(fragSpec{
+		channel: innerChKey, sub17: 0x01, subWire: 0x818b,
+		totalFrags: 1, fragIdx: 0, paylen: uint16(len(payload)), frameNum: 1,
+		payload: payload,
+	}))
+
+	const first = uint64(0x818b)
+	if got := c.contiguousAckExt(); got != first {
+		t.Fatalf("ACK watermark=0x%x, want retained origin 0x%x", got, first)
+	}
+	if got := c.stats.ackSeenPending.Load(); got != 0 {
+		t.Fatalf("ACK pending=%d, want 0 after origin anchor", got)
+	}
+	a, _ := ackFor(t, c)
+	if a.AVBase != uint16(first-1) || a.AVHigh != uint16(first) || len(a.Missing) != 0 {
+		t.Fatalf("anchored ACK=%+v, want base/high 0x818a/0x818b without NACKs", a)
+	}
+}
+
+func TestAudioBeforeVideoDoesNotAnchorRetainedSDSequenceOrigin(t *testing.T) {
+	c := newTestClient(0x4000, "sd")
+	c.avSequenceAnchored = false // bootstrap observed no media beyond 0x3fff
+
+	// Audio has its own low wire values and may arrive before video. It is not
+	// evidence for where this session's video AV sequence begins.
+	audio := []byte{0xff, 0xf1, 0x50, 0x80, 0x01, 0x7f, 0xfc}
+	c.parseDatagram(makePkt(fragSpec{
+		channel: innerChAudio, sub17: 0x01, subWire: 0x0005,
+		totalFrags: 1, fragIdx: 0, paylen: uint16(len(audio)), frameNum: 1,
+		payload: audio,
+	}))
+	if c.avSequenceAnchored {
+		t.Fatal("audio packet incorrectly established the video AV sequence origin")
+	}
+	if got := c.avNextExt; got != 0x4000 {
+		t.Fatalf("audio moved assembler origin to 0x%x, want 0x4000", got)
+	}
+	if got := c.avHighExt; got != 0x3fff {
+		t.Fatalf("audio moved receive high-water to 0x%x, want 0x3fff", got)
+	}
+	if len(c.avBuffer) != 0 {
+		t.Fatalf("pre-origin audio entered reorder buffer: %d packets", len(c.avBuffer))
+	}
+	// The alternate AAC layout uses the inter-frame channel marker, so channel
+	// identity alone is insufficient to decide that a packet is video.
+	alternateAudio := append(make([]byte, 8), audio...)
+	c.parseDatagram(makePkt(fragSpec{
+		channel: innerChInter, b1: 0x0d, sub17: 0x00, subWire: 0x0006,
+		totalFrags: 1, fragIdx: 0, paylen: uint16(len(alternateAudio)), frameNum: 2,
+		payload: alternateAudio,
+	}))
+	if c.avSequenceAnchored {
+		t.Fatal("alternate-layout audio incorrectly established the video AV sequence origin")
+	}
+	if got := c.contiguousAckExt(); got != 0x3fff {
+		t.Fatalf("pre-origin audio moved ACK watermark to 0x%x, want 0x3fff", got)
+	}
+
+	video := makeTrailerPayload([]byte{0, 0, 0, 1, 0x65, 0x88}, true, 1, 1000)
+	c.parseDatagram(makePkt(fragSpec{
+		channel: innerChKey, sub17: 0x01, subWire: 0x818b,
+		totalFrags: 1, fragIdx: 0, paylen: uint16(len(video)), frameNum: 1,
+		payload: video,
+	}))
+	if !c.avSequenceAnchored {
+		t.Fatal("first video packet did not establish the AV sequence origin")
+	}
+	if got := c.contiguousAckExt(); got != 0x818b {
+		t.Fatalf("ACK watermark=0x%x, want retained video origin 0x818b", got)
+	}
+}
+
+func TestFirstRuntimeMediaPreservesRepresentableInitialLoss(t *testing.T) {
+	c := newTestClient(0x4000, "sd")
+	c.avSequenceAnchored = false // bootstrap observed no media beyond 0x3fff
+
+	payload := append([]byte{0, 0, 0, 1, 0x41, 0x88}, make([]byte, 16)...)
+	payload = makeTrailerPayload(payload, false, 0x01, 1000)
+	c.parseDatagram(makePkt(fragSpec{
+		channel: innerChInter, sub17: 0x01, subWire: 0x4002,
+		totalFrags: 1, fragIdx: 0, paylen: uint16(len(payload)), frameNum: 1,
+		payload: payload,
+	}))
+
+	if got := c.contiguousAckExt(); got != 0x3fff {
+		t.Fatalf("ACK watermark=0x%x, want bootstrap watermark 0x3fff", got)
+	}
+	a, _ := ackFor(t, c)
+	if !reflect.DeepEqual(a.Missing, []uint16{1, 2}) {
+		t.Fatalf("initial-loss ACK=%+v, want missing offsets [1 2]", a)
+	}
+}
+
+func TestQueuePacketReportsOutputQueueDrop(t *testing.T) {
+	c := newTestClient(0x4000, "hd")
+	c.frames = make(chan *Packet, 1)
+	if !c.queuePacket(&Packet{Codec: CodecH264}) {
+		t.Fatal("first packet was not queued")
+	}
+	if c.queuePacket(&Packet{Codec: CodecH264}) {
+		t.Fatal("second packet unexpectedly fit in full queue")
+	}
+	if got := c.stats.emitDrops.Load(); got != 1 {
+		t.Fatalf("output queue drops=%d, want 1", got)
+	}
+}
+
+func TestOutputQueueDropSuppressesDependentPFramesUntilIDR(t *testing.T) {
+	c := newTestClient(0x4000, "hd")
+	c.frames = make(chan *Packet, 1)
+
+	idr := []byte{0, 0, 0, 1, 0x65, 0x88}
+	inter := []byte{0, 0, 0, 1, 0x61, 0x99}
+	c.emitAU(idr, 1, innerChKey, 1, 1000, true)
+	c.emitAU(inter, 2, innerChInter, 1, 1040, true) // full queue: reference AU lost
+
+	first := drainAll(c)
+	if len(first) != 1 || !first[0].IsKeyframe {
+		t.Fatalf("initial output=%+v, want one IDR", first)
+	}
+
+	c.emitAU(inter, 3, innerChInter, 1, 1080, true)
+	if got := drainAll(c); len(got) != 0 {
+		t.Fatalf("forwarded %d dependent P-frames after a queue drop", len(got))
+	}
+
+	c.emitAU(idr, 4, innerChKey, 1, 1120, true)
+	recoveryHead := drainAll(c)
+	if len(recoveryHead) != 1 || !recoveryHead[0].IsKeyframe {
+		t.Fatalf("recovery head=%+v, want one IDR", recoveryHead)
+	}
+	c.emitAU(inter, 5, innerChInter, 1, 1160, true)
+	got := drainAll(c)
+	if len(got) != 1 || got[0].IsKeyframe {
+		t.Fatalf("post-IDR output=%+v, want one P-frame", got)
+	}
+	if got := c.stats.emitDrops.Load(); got != 1 {
+		t.Fatalf("output queue drops=%d, want 1", got)
+	}
+	if got := c.stats.gopRecoveryDrop.Load(); got != 1 {
+		t.Fatalf("GOP recovery drops=%d, want 1", got)
+	}
+}
+
+func TestGappedReferencePFrameSuppressesGOPUntilIDR(t *testing.T) {
+	c := newTestClient(0x4000, "hd") // non-strict is the production default
+	idr := []byte{0, 0, 0, 1, 0x65, 0x88}
+	inter := []byte{0, 0, 0, 1, 0x61, 0x99}
+
+	// Establish a clean GOP, then discard its queued head so the assertions
+	// below cover only the loss/recovery sequence.
+	c.emit(&pendingFrag{channel: innerChKey, frameNum: 1, totalFrags: 1,
+		payload: makeTrailerPayload(idr, true, 1, 1000)})
+	_ = drainAll(c)
+
+	// A fragment-index gap makes frame 2 incomplete. It must not be emitted,
+	// and frame 3 is dependent on that missing reference picture.
+	c.emit(&pendingFrag{channel: innerChInter, frameNum: 2, totalFrags: 3,
+		fragIdx: 0, payload: inter})
+	c.emit(&pendingFrag{channel: innerChInter, frameNum: 2, totalFrags: 3,
+		fragIdx: 2, payload: []byte{0xaa, 0xbb}})
+	c.emit(&pendingFrag{channel: innerChInter, frameNum: 2, totalFrags: 3,
+		fragIdx: 3, payload: makeTrailerPayload([]byte{0xcc}, false, 1, 1040)})
+	c.emit(&pendingFrag{channel: innerChInter, frameNum: 3, totalFrags: 1,
+		payload: makeTrailerPayload(inter, false, 1, 1080)})
+	if got := drainAll(c); len(got) != 0 {
+		t.Fatalf("forwarded %d P-frames after a gapped reference picture", len(got))
+	}
+
+	// A new IDR starts a self-contained prediction chain; following P-frames
+	// may then be forwarded normally.
+	c.emit(&pendingFrag{channel: innerChKey, frameNum: 4, totalFrags: 1,
+		payload: makeTrailerPayload(idr, true, 1, 1120)})
+	c.emit(&pendingFrag{channel: innerChInter, frameNum: 5, totalFrags: 1,
+		payload: makeTrailerPayload(inter, false, 1, 1160)})
+	got := drainAll(c)
+	if len(got) != 2 || !got[0].IsKeyframe || got[1].IsKeyframe {
+		t.Fatalf("recovery output=%+v, want IDR followed by P-frame", got)
+	}
+	if got := c.stats.gopRecoveryDrop.Load(); got != 1 {
+		t.Fatalf("GOP recovery drops=%d, want 1", got)
+	}
+}
+
+func TestAcceptedInterMediaCannotLeaveEmptyPendingAssembly(t *testing.T) {
+	c := newTestClient(0x4000, "hd")
+
+	// Data-family video with an empty payload is rejected by decoding before
+	// it can create framePending with an empty assembly buffer.
+	c.parseDatagram(makePkt(fragSpec{
+		channel: innerChInter, b1: 0x00, subWire: 0x4000,
+		totalFrags: 2, fragIdx: 0, paylen: 0, frameNum: 1,
+	}))
+	if c.interAsm.framePending {
+		t.Fatal("zero-payload video created a pending inter-frame assembly")
+	}
+
+	// A trailer-only multi-fragment P-frame is accepted as media but reaches
+	// the zero-data hard floor synchronously and resets the assembly.
+	trailer := makeTrailerPayload(nil, false, 1, 1040)
+	c.parseDatagram(makePkt(fragSpec{
+		channel: innerChInter, b1: 0x01, sub17: 0x01, subWire: 0x4000,
+		totalFrags: 2, fragIdx: 1, paylen: uint16(len(trailer)), frameNum: 2,
+		payload: trailer,
+	}))
+	if c.interAsm.framePending || len(c.interAsm.buf) != 0 {
+		t.Fatalf("hard-dropped P-frame left pending assembly: %+v", c.interAsm)
+	}
+	if !c.gopPoisoned {
+		t.Fatal("hard-dropped reference P-frame did not poison its GOP")
+	}
 }
 
 // drainAll pulls every queued Packet without blocking and returns them.

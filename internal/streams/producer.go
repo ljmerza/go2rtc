@@ -33,6 +33,7 @@ type Producer struct {
 
 	conn      core.Producer
 	receivers []*core.Receiver
+	clocks    []*timestampContinuity
 	senders   []*core.Receiver
 
 	state    state
@@ -137,8 +138,11 @@ func (p *Producer) GetTrack(media *core.Media, codec *core.Codec) (*core.Receive
 	if err != nil {
 		return nil, err
 	}
+	clock := new(timestampContinuity)
+	track.Input = clock.wrap(track.Input)
 
 	p.receivers = append(p.receivers, track)
+	p.clocks = append(p.clocks, clock)
 
 	if p.state == stateMedias {
 		p.state = stateTracks
@@ -270,6 +274,8 @@ func (p *Producer) reconnect(workerID, retry int) {
 				if err != nil {
 					continue
 				}
+				clock := p.clocks[i]
+				track.Input = clock.wrap(track.Input)
 
 				receiver.Replace(track)
 				p.receivers[i] = track
@@ -327,5 +333,6 @@ func (p *Producer) stop() {
 
 	p.state = stateNone
 	p.receivers = nil
+	p.clocks = nil
 	p.senders = nil
 }

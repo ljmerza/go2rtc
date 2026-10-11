@@ -48,9 +48,23 @@ type Conn struct {
 
 	state   State
 	stateMu sync.Mutex
+	sendMu  sync.Mutex
 
 	udpConn []*net.UDPConn
 	udpAddr []*net.UDPAddr
+}
+
+func (c *Conn) addSend(n int) {
+	c.sendMu.Lock()
+	c.Send += n
+	c.sendMu.Unlock()
+}
+
+func (c *Conn) bytesSent() int {
+	c.sendMu.Lock()
+	n := c.Send
+	c.sendMu.Unlock()
+	return n
 }
 
 const (
