@@ -93,3 +93,37 @@ func TestRuntimeStatusPreservesErrorOnClose(t *testing.T) {
 		t.Fatalf("unexpected HD transition=%+v", status.HDTransition)
 	}
 }
+
+func TestRuntimeStatusIgnoresSupersededSessionWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.json")
+	old := newRuntimeStatusWriter(path, "hd")
+	old.setStatus("online")
+	current := newRuntimeStatusWriter(path, "hd")
+	current.setStatus("online")
+
+	old.markOffline()
+	status := readRuntimeStatus(t, path)
+	if status.Status != "online" {
+		t.Fatalf("superseded close published %q, want online", status.Status)
+	}
+
+	current.markOffline()
+	status = readRuntimeStatus(t, path)
+	if status.Status != "offline" {
+		t.Fatalf("current close published %q, want offline", status.Status)
+	}
+}
+
+func TestRuntimeStatusFailedReplacementSupersedesOldSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.json")
+	old := newRuntimeStatusWriter(path, "hd")
+	old.setStatus("online")
+	replacement := newRuntimeStatusWriter(path, "hd")
+	replacement.setStatus("error")
+
+	old.markOffline()
+	status := readRuntimeStatus(t, path)
+	if status.Status != "error" {
+		t.Fatalf("superseded close published %q, want replacement error", status.Status)
+	}
+}

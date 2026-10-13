@@ -44,8 +44,8 @@ type cameraRuntimeStatus struct {
 }
 
 // runtimeStatusWriter is the structured hand-off between the PLAF203 camera
-// adapter and the add-on controller. It serializes every mutation and replaces the
-// destination atomically so readers never observe partial JSON.
+// adapter and the add-on controller. It serializes every mutation and replaces
+// the destination atomically so readers never observe partial JSON.
 type runtimeStatusWriter struct {
 	mu         sync.Mutex
 	path       string
@@ -54,6 +54,33 @@ type runtimeStatusWriter struct {
 	lastUpdate time.Time
 	state      cameraRuntimeStatus
 	lastError  string
+	generation uint64
+}
+
+var runtimeStatusOwners = struct {
+	sync.Mutex
+	next  uint64
+	paths map[string]uint64
+}{paths: make(map[string]uint64)}
+
+// Each physical session claims its status path before publishing. A replacement
+// therefore supersedes the previous session before reconnect closes it.
+func claimRuntimeStatus(path string) uint64 {
+	runtimeStatusOwners.Lock()
+	defer runtimeStatusOwners.Unlock()
+	runtimeStatusOwners.next++
+	generation := runtimeStatusOwners.next
+	runtimeStatusOwners.paths[path] = generation
+	return generation
+}
+
+func writeOwnedRuntimeStatus(path string, generation uint64, data []byte) error {
+	runtimeStatusOwners.Lock()
+	defer runtimeStatusOwners.Unlock()
+	if runtimeStatusOwners.paths[path] != generation {
+		return nil
+	}
+	return atomicWriteRuntimeStatus(path, data)
 }
 
 func newRuntimeStatusWriter(path, quality string) *runtimeStatusWriter {
@@ -67,8 +94,9 @@ func newRuntimeStatusWriterWithClock(
 		return nil
 	}
 	w := &runtimeStatusWriter{
-		path: path,
-		now:  now,
+		path:       path,
+		now:        now,
+		generation: claimRuntimeStatus(path),
 		state: cameraRuntimeStatus{
 			SchemaVersion:    runtimeStatusSchemaVersion,
 			Status:           "starting",
@@ -169,7 +197,7 @@ func (w *runtimeStatusWriter) writeLocked() {
 	w.state.LastUpdate = now.Format(time.RFC3339Nano)
 	data, err := json.Marshal(w.state)
 	if err == nil {
-		err = atomicWriteRuntimeStatus(w.path, append(data, '\n'))
+		err = writeOwnedRuntimeStatus(w.path, w.generation, append(data, '\n'))
 	}
 	if err == nil {
 		w.lastError = ""
