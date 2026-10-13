@@ -445,6 +445,7 @@ func (c *Client) dumpStats() {
 			missingFragmentsTotal:      cur.missingFragmentsTotal - c.prevStats.missingFragmentsTotal,
 			maxMissingFragmentsInFrame: cur.maxMissingFragmentsInFrame,
 			normalMediaPackets:         cur.normalMediaPackets - c.prevStats.normalMediaPackets,
+			mediaRetransmissions:       cur.mediaRetransmissions - c.prevStats.mediaRetransmissions,
 			extendedMediaCandidates:    cur.extendedMediaCandidates - c.prevStats.extendedMediaCandidates,
 			extendedMediaParsed:        cur.extendedMediaParsed - c.prevStats.extendedMediaParsed,
 			extendedMediaRejected:      cur.extendedMediaRejected - c.prevStats.extendedMediaRejected,
@@ -519,9 +520,10 @@ func (c *Client) dumpStats() {
 		Uint64("packets_received", delta.pktsIn).Uint64("video_frames_queued", delta.vidFramesOut).
 		Uint64("video_frames_dropped", delta.vidDropped).Uint64("missing_fragments", delta.missingFragmentsTotal).
 		Uint64("reader_queue_drops", delta.readerDrops).Uint64("output_queue_drops", delta.emitDrops).
+		Uint64("media_retransmissions", delta.mediaRetransmissions).
 		Uint64("ack_pending", cur.ackSeenPending).Uint64("ack_nacks", cur.ackNACKCount).
 		Msg("petlibro transport health")
-	log.Trace().Str("physical_session_id", c.sessionID).Msgf("petlibro transport diagnostics: in=%d pkts (%d KiB) families: key=%d inter=%d audio=%d other=%d | video: %d frames in -> %d out (drop %d) | loss: frames=%d idr=%d p=%d missing=%d maxFrame=%d | frag skips: %d (%d frags lost) | forceDrain: %d | qDrops reader=%d emit=%d | reasons: fragIdxGap=%d frameNumJumpKey=%d frameNumJumpInter=%d expectedDataShortfall=%d zeroDataHardDrop=%d strictIDRDrop=%d strictPDrop=%d gopRecoveryDrop=%d forceDrainFlush=%d forceDrainEntries=%d deferredDrop=%d | mediaHeaders: normal=%d extendedMedia parsed=%d rejected=%d data=%d end=%d rare=%d unknown0c08=%d unknown0c0d=%d candidates=%d seqAssembled=%d seqUnhandled=%d | frameinfo: codec=0x%04x flag=%d onlineNum=%d changes=%d unexpected=%d | transport: ackRx=%d probeRx=%d responseTx=%d feedbackRx=%d watermark=0x%x high=0x%x avNext=0x%x pending=%d ranges=%d nacks=%d overflow=%d advanced=%d duplicate=%d ackTx=%d base=0x%04x highWire=0x%04x reliable=0x%04x sendCount=0x%04x",
+	log.Trace().Str("physical_session_id", c.sessionID).Msgf("petlibro transport diagnostics: in=%d pkts (%d KiB) families: key=%d inter=%d audio=%d other=%d | video: %d frames in -> %d out (drop %d) | loss: frames=%d idr=%d p=%d missing=%d maxFrame=%d | frag skips: %d (%d frags lost) | forceDrain: %d | qDrops reader=%d emit=%d | reasons: fragIdxGap=%d frameNumJumpKey=%d frameNumJumpInter=%d expectedDataShortfall=%d zeroDataHardDrop=%d strictIDRDrop=%d strictPDrop=%d gopRecoveryDrop=%d forceDrainFlush=%d forceDrainEntries=%d deferredDrop=%d | mediaHeaders: normal=%d retransmit=%d extendedMedia parsed=%d rejected=%d data=%d end=%d rare=%d unknown0c08=%d unknown0c0d=%d candidates=%d seqAssembled=%d seqUnhandled=%d | frameinfo: codec=0x%04x flag=%d onlineNum=%d changes=%d unexpected=%d | transport: ackRx=%d probeRx=%d responseTx=%d feedbackRx=%d watermark=0x%x high=0x%x avNext=0x%x pending=%d ranges=%d nacks=%d overflow=%d advanced=%d duplicate=%d ackTx=%d base=0x%04x highWire=0x%04x reliable=0x%04x sendCount=0x%04x",
 		delta.pktsIn, delta.bytesIn/1024,
 		delta.keyFrags, delta.interFrags, delta.audioFrags, delta.otherFrags,
 		delta.vidFramesIn, delta.vidFramesOut, delta.vidDropped,
@@ -532,7 +534,7 @@ func (c *Client) dumpStats() {
 		delta.expectedDataShortfall, delta.zeroDataHardDrop,
 		delta.strictIDRDrop, delta.strictPDrop, delta.gopRecoveryDrop, delta.forceDrainFlush,
 		delta.forceDrainEntries, delta.deferredDrop,
-		delta.normalMediaPackets, delta.extendedMediaParsed, delta.extendedMediaRejected,
+		delta.normalMediaPackets, delta.mediaRetransmissions, delta.extendedMediaParsed, delta.extendedMediaRejected,
 		delta.extendedMediaDataPackets, delta.extendedMediaEndPackets, delta.extendedMediaRarePackets,
 		delta.unknown0c08Remaining, delta.unknown0c0dRemaining, delta.extendedMediaCandidates,
 		delta.sequenceSeenAndAssembled, delta.sequenceSeenButUnhandled,

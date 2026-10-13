@@ -84,12 +84,17 @@ var (
 	qualitySD = []byte{byte(ioctlPetlibroStreamCtrl), 0, 0, 0, 0x02, 0x00, 0x8a, 0x81, 0, 0, 0, 0}
 )
 
-// Inner media-family markers at offset 16. AF203 uses 0x05 for the
-// key/IDR family and 0x07 for inter frames; these are not HD/SD selectors.
+// Inner media-family markers at offset 16 in the normal header (offset 24 in
+// the extended header). AF203 rewrites the canonical marker to the following
+// byte when it moves a NACKed packet into its retransmit queue. These are media
+// semantics, not HD/SD selectors.
 const (
-	innerChKey   byte = 0x05
-	innerChInter byte = 0x07
-	innerChAudio byte = 0x03 // AAC audio
+	innerChAudio        byte = 0x03 // AAC audio
+	innerChRetransAudio byte = 0x04
+	innerChKey          byte = 0x05
+	innerChRetransKey   byte = 0x06
+	innerChInter        byte = 0x07
+	innerChRetransInter byte = 0x08
 )
 
 // XOR key applied to IOCtrl bodies (the "outer" Charlie key — same one

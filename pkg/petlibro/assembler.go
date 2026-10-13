@@ -257,7 +257,8 @@ func (c *Client) logAVLoss(asm *channelAsm, channel byte, hasTrailer bool, trail
 
 type decodedMedia struct {
 	b1           byte
-	channel      byte
+	channel      byte // normalized media channel
+	wireChannel  byte
 	subFlag      byte
 	subWire      uint16
 	totalFrags   uint16
@@ -270,6 +271,27 @@ type decodedMedia struct {
 	isAudio      bool
 	isEnd        bool
 	extended     bool
+	retransmit   bool
+}
+
+// normalizeMediaChannel maps the retransmission representation emitted by
+// AF203 back to the canonical media family used by the assembler. Firmware
+// FUN_003b5374 performs the inverse rewrite when a NACKed packet is moved into
+// its retransmit queue. Packet layout and payload validation still happen
+// after this classification; a channel marker alone is never ACK evidence.
+func normalizeMediaChannel(wire byte) (channel byte, retransmit bool, ok bool) {
+	switch wire {
+	case innerChAudio, innerChKey, innerChInter:
+		return wire, false, true
+	case innerChRetransAudio:
+		return innerChAudio, true, true
+	case innerChRetransKey:
+		return innerChKey, true, true
+	case innerChRetransInter:
+		return innerChInter, true, true
+	default:
+		return 0, false, false
+	}
 }
 
 func isExtendedMediaFamily(b1 byte) bool {
@@ -301,7 +323,9 @@ func decodeExtendedMedia(inner []byte) (m decodedMedia, reason string, ok bool) 
 		return m, "short_header", false
 	}
 
-	m.channel = inner[24]
+	m.wireChannel = inner[24]
+	var channelOK bool
+	m.channel, m.retransmit, channelOK = normalizeMediaChannel(m.wireChannel)
 	m.subFlag = inner[25]
 	m.totalFrags = binary.LittleEndian.Uint16(inner[28:30])
 	m.fragIdx = binary.LittleEndian.Uint16(inner[30:32])
@@ -309,7 +333,7 @@ func decodeExtendedMedia(inner []byte) (m decodedMedia, reason string, ok bool) 
 	m.frameNum = binary.LittleEndian.Uint32(inner[36:40])
 	m.mediaFrameNo = binary.LittleEndian.Uint32(inner[40:44])
 
-	if m.channel != innerChKey && m.channel != innerChInter && m.channel != innerChAudio {
+	if !channelOK {
 		return m, "invalid_channel", false
 	}
 	if m.totalFrags == 0 {
@@ -366,13 +390,18 @@ func decodeNormalMedia(inner []byte) (m decodedMedia, ok bool) {
 		return m, false
 	}
 	m.b1 = inner[1]
-	m.channel = inner[16]
+	m.wireChannel = inner[16]
+	var channelOK bool
+	m.channel, m.retransmit, channelOK = normalizeMediaChannel(m.wireChannel)
 	m.subFlag = inner[17]
 	m.subWire = binary.LittleEndian.Uint16(inner[18:20])
 	m.totalFrags = uint16(inner[20])
 	m.fragIdx = binary.LittleEndian.Uint16(inner[22:24])
 	m.payloadLen = binary.LittleEndian.Uint16(inner[24:26])
 	m.frameNum = binary.LittleEndian.Uint32(inner[28:32])
+	if !channelOK {
+		return m, false
+	}
 
 	payloadFrom := func(start int) []byte {
 		if m.payloadLen != 0 && start+int(m.payloadLen) <= len(inner) {
@@ -420,6 +449,8 @@ func (c *Client) traceExtendedMedia(m decodedMedia, accepted bool, reason string
 		Str("type", fmt.Sprintf("0c%02x", m.b1)).
 		Bool("accepted", accepted).
 		Uint8("channel", m.channel).
+		Uint8("wireChannel", m.wireChannel).
+		Bool("retransmit", m.retransmit).
 		Uint16("subWire", m.subWire).
 		Uint16("totalFrags", m.totalFrags).
 		Uint16("fragIdx", m.fragIdx).
@@ -583,6 +614,9 @@ func (c *Client) parseDatagram(pkt []byte) {
 		media = normal
 		c.stats.normalMediaPackets.Add(1)
 	}
+	if media.retransmit {
+		c.stats.mediaRetransmissions.Add(1)
+	}
 
 	switch media.channel {
 	case innerChKey:
@@ -664,6 +698,7 @@ func (c *Client) parseDatagram(pkt []byte) {
 	if c.verbose && c.tracePackets {
 		log.Trace().Str("physical_session_id", c.sessionID).
 			Uint8("innerType", inner[0]).Uint8("b1", media.b1).Uint8("channel", media.channel).
+			Uint8("wireChannel", media.wireChannel).Bool("retransmit", media.retransmit).
 			Bool("extended", media.extended).
 			Uint16("subWire", media.subWire).Uint64("subExt", subExt).Uint32("frameNum", media.frameNum).
 			Uint16("fragIdx", media.fragIdx).Uint16("totalFrags", media.totalFrags).

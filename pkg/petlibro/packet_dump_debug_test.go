@@ -164,6 +164,11 @@ func TestPacketSummaryClassifiers(t *testing.T) {
 	if class != "extended_media_data_ch0x05_b1_0x08" || !media || sub != 0x4000 || channel != innerChKey || frame != 1 {
 		t.Fatalf("extended packet classification=%q sub=0x%x channel=0x%x frame=%d media=%t", class, sub, channel, frame, media)
 	}
+	retransmitted := capturedRetransInter33745(t)
+	class, sub, channel, frame, media = classifyD2C(retransmitted)
+	if class != "media_ch0x07_wire0x08_retransmit_b1_0x00" || !media || sub != 33745 || channel != innerChInter || frame != 2538028 {
+		t.Fatalf("retransmission classification=%q sub=%d channel=0x%x frame=%d media=%t", class, sub, channel, frame, media)
+	}
 }
 
 func classifyC2D(body []byte) string {
@@ -249,21 +254,24 @@ func classifyD2C(pkt []byte) (string, uint16, byte, uint32, bool) {
 		}
 	}
 	if len(inner) >= 36 && inner[0] == 0x0c {
-		ch := inner[16]
-		sub := binary.LittleEndian.Uint16(inner[18:20])
-		frame := binary.LittleEndian.Uint32(inner[28:32])
-		if ch == innerChKey || ch == innerChInter || ch == innerChAudio {
-			class := fmt.Sprintf("media_ch0x%02x_b1_0x%02x", ch, inner[1])
-			paylen := int(binary.LittleEndian.Uint16(inner[24:26]))
-			if paylen >= 16 && 36+paylen <= len(inner) {
-				payload := inner[36 : 36+paylen]
-				if _, _, online, ok := stripFragmentMetadataTrailer(payload); ok {
-					t := payload[len(payload)-16:]
+		if m, ok := decodeNormalMedia(inner); ok {
+			class := fmt.Sprintf("media_ch0x%02x", m.channel)
+			if m.retransmit {
+				class += fmt.Sprintf("_wire0x%02x_retransmit", m.wireChannel)
+			}
+			class += fmt.Sprintf("_b1_0x%02x", m.b1)
+			if len(m.payload) >= 16 {
+				if _, _, online, ok := stripFragmentMetadataTrailer(m.payload); ok {
+					t := m.payload[len(m.payload)-16:]
 					class += fmt.Sprintf("_frameinfo_codec0x%04x_flag%d_onlineNum_%d", binary.LittleEndian.Uint16(t), t[2], online)
 				}
 			}
-			return class, sub, ch, frame, true
+			return class, m.subWire, m.channel, m.frameNum, true
 		}
+
+		ch := inner[16]
+		sub := binary.LittleEndian.Uint16(inner[18:20])
+		frame := binary.LittleEndian.Uint32(inner[28:32])
 		paylen := int(binary.LittleEndian.Uint32(inner[24:28]))
 		if paylen >= 4 && 36+paylen <= len(inner) {
 			plain := xorBody(inner[36 : 36+paylen])

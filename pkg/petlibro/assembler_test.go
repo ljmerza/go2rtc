@@ -3,6 +3,7 @@ package petlibro
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"reflect"
 	"testing"
 )
@@ -285,6 +286,53 @@ func makePkt(f fragSpec) []byte {
 	binary.LittleEndian.PutUint16(pkt[8:], msgSessionD2C)
 	copy(pkt[0x1C:], inner)
 	return pkt
+}
+
+// makeCapturedNormalPkt preserves a capture-derived 36-byte normal-media
+// header while allowing the media payload to be sanitized. Raw camera media
+// is intentionally not retained in the repository.
+func makeCapturedNormalPkt(t *testing.T, headerHex string, payload []byte) []byte {
+	t.Helper()
+	header, err := hex.DecodeString(headerHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(header) != 36 {
+		t.Fatalf("capture header is %d bytes, want 36", len(header))
+	}
+	if got := int(binary.LittleEndian.Uint16(header[24:26])); got != len(payload) {
+		t.Fatalf("capture header payload length=%d, fixture payload=%d", got, len(payload))
+	}
+	inner := append(header, payload...)
+	pkt := make([]byte, 0x1c+len(inner))
+	pkt[3] = flagsRecv
+	binary.LittleEndian.PutUint16(pkt[4:], uint16(0x0c+len(inner)))
+	binary.LittleEndian.PutUint16(pkt[8:], msgSessionD2C)
+	copy(pkt[0x1c:], inner)
+	return pkt
+}
+
+// These headers were independently decrypted from onset_udp.pcap in archive
+// plaf203-onset-20261012T131704Z.tar.gz (SHA-256
+// 4b50191ddbc7d8ea247b574eee22e3b15121a6fd677cbf203a25017788424a43).
+// PCAP frame 177683 is sequence 33744, retransmit-audio channel 0x04;
+// frame 177684 is sequence 33745, retransmit-inter channel 0x08. Payloads are
+// replaced below with deterministic media-shaped bytes for privacy.
+const (
+	capturedRetransAudio33744Header = "0c010b00feba050097cf0519010000000401d0830100100098008f452bba2600cc801800"
+	capturedRetransInter33745Header = "0c000b00ffba050097cf0619010000000800d183070000000004ed2a2cba260061390e00"
+)
+
+func capturedRetransAudio33744(t *testing.T) []byte {
+	payload := make([]byte, 152)
+	copy(payload, []byte{0xff, 0xf1, 0x50, 0x40, 0x11, 0x01, 0x24})
+	return makeCapturedNormalPkt(t, capturedRetransAudio33744Header, payload)
+}
+
+func capturedRetransInter33745(t *testing.T) []byte {
+	payload := dataFragPayload(0x31, 1024)
+	copy(payload, []byte{0x00, 0x00, 0x00, 0x01, 0x61})
+	return makeCapturedNormalPkt(t, capturedRetransInter33745Header, payload)
 }
 
 func makeExtendedPkt(f extendedFragSpec) []byte {
@@ -666,6 +714,165 @@ func TestExtendedMediaHeaderAssemblyAndACK(t *testing.T) {
 	}
 }
 
+func TestCapturedRetransmissionsRecoverACKGap(t *testing.T) {
+	// The captured failure's contiguous receive position was 33743. Deliver a
+	// captured retransmitted inter fragment and one newer canonical fragment
+	// first, leaving 33744 as the outstanding hole.
+	c := newTestClient(33744, "hd")
+	interRetrans := capturedRetransInter33745(t)
+	media, ok := decodeNormalMedia(interRetrans[0x1c:])
+	if !ok || media.wireChannel != innerChRetransInter || media.channel != innerChInter || !media.retransmit {
+		t.Fatalf("captured inter classification=%+v ok=%t", media, ok)
+	}
+	c.parseDatagram(interRetrans)
+	c.parseDatagram(makePkt(fragSpec{
+		channel: innerChInter, b1: 0x00, subWire: 33746,
+		totalFrags: 7, fragIdx: 1, paylen: 32, frameNum: 2538028,
+		payload: dataFragPayload(0x52, 32),
+	}))
+	before, _ := ackFor(t, c)
+	if before.AVBase != 33743 || before.AVHigh != 33746 || !reflect.DeepEqual(before.Missing, []uint16{1}) {
+		t.Fatalf("ACK before recovery=%+v", before)
+	}
+
+	audioRetrans := capturedRetransAudio33744(t)
+	media, ok = decodeNormalMedia(audioRetrans[0x1c:])
+	if !ok || media.wireChannel != innerChRetransAudio || media.channel != innerChAudio || !media.retransmit || !media.isAudio {
+		t.Fatalf("captured audio classification=%+v ok=%t", media, ok)
+	}
+	c.parseDatagram(audioRetrans)
+
+	after, _ := ackFor(t, c)
+	if after.AVBase != 33743 || after.AVHigh != 33746 || len(after.Missing) != 0 {
+		t.Fatalf("ACK after recovery=%+v", after)
+	}
+	if got := c.contiguousAckExt(); got != 33746 {
+		t.Fatalf("ACK watermark=%d, want 33746", got)
+	}
+	if got := c.stats.ackSeenPending.Load(); got != 0 {
+		t.Fatalf("ACK pending=%d, want 0", got)
+	}
+	if got := c.stats.ackAdvanced.Load(); got != 3 {
+		t.Fatalf("ACK advanced=%d, want 3", got)
+	}
+	if got := c.stats.mediaRetransmissions.Load(); got != 2 {
+		t.Fatalf("accepted media retransmissions=%d, want 2", got)
+	}
+	packets := drainAll(c)
+	if len(packets) != 1 || packets[0].Codec != CodecAACADTS {
+		t.Fatalf("recovered output=%+v, want one AAC unit", packets)
+	}
+
+	// Repeating the now-old retransmission is valid wire media, but it cannot
+	// regress either ACK or assembly state and must not emit duplicate audio.
+	c.parseDatagram(audioRetrans)
+	if got := c.contiguousAckExt(); got != 33746 {
+		t.Fatalf("duplicate retransmission regressed ACK watermark to %d", got)
+	}
+	if got := c.stats.ackDuplicateOrOld.Load(); got != 1 {
+		t.Fatalf("duplicate/old count=%d, want 1", got)
+	}
+	if got := c.stats.deferredDrop.Load(); got != 1 {
+		t.Fatalf("late assembler drop count=%d, want 1", got)
+	}
+	if got := len(drainAll(c)); got != 0 {
+		t.Fatalf("duplicate retransmission emitted %d packets", got)
+	}
+}
+
+func TestRetransmittedKeyframeAssemblesOnCanonicalChannel(t *testing.T) {
+	c := newTestClient(0x4000, "hd")
+	data := []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x99}
+	c.parseDatagram(makePkt(fragSpec{
+		channel: innerChRetransKey, b1: 0x00, subWire: 0x4000,
+		totalFrags: 2, fragIdx: 0, paylen: uint16(len(data)), frameNum: 10, payload: data,
+	}))
+	end := makeTrailerPayload([]byte{0xaa, 0xbb}, true, 1, 1000)
+	c.parseDatagram(makePkt(fragSpec{
+		channel: innerChRetransKey, b1: 0x01, sub17: 0x01, subWire: 0x4001,
+		totalFrags: 2, fragIdx: 16, paylen: uint16(len(end)), frameNum: 10, payload: end,
+	}))
+
+	packets := drainAll(c)
+	if len(packets) != 1 || packets[0].Codec != CodecH264 || !packets[0].IsKeyframe || packets[0].Channel != innerChKey {
+		t.Fatalf("retransmitted keyframe output=%+v", packets)
+	}
+	if got := c.contiguousAckExt(); got != 0x4001 {
+		t.Fatalf("ACK watermark=0x%x, want 0x4001", got)
+	}
+	if got := c.stats.mediaRetransmissions.Load(); got != 2 {
+		t.Fatalf("accepted media retransmissions=%d, want 2", got)
+	}
+}
+
+func TestExtendedRetransmissionChannelsUseSameMediaSemantics(t *testing.T) {
+	c := newTestClient(0x4000, "sd")
+	audio := []byte{0xff, 0xf1, 0x50, 0x80, 0x01, 0x7f, 0xfc}
+	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
+		b1: 0x09, channel: innerChRetransAudio, subFlag: 1,
+		subWire: 0x4000, totalFrags: 1, fragIdx: 16,
+		frameNum: 20, mediaFrameNo: 4, payload: audio,
+	}))
+	video := makeTrailerPayload([]byte{0, 0, 0, 1, 0x61, 0x88}, false, 1, 1040)
+	c.parseDatagram(makeExtendedPkt(extendedFragSpec{
+		b1: 0x0d, channel: innerChRetransInter, subFlag: 1,
+		subWire: 0x4001, totalFrags: 1, fragIdx: 16,
+		frameNum: 21, mediaFrameNo: 5, payload: video,
+	}))
+
+	packets := drainAll(c)
+	if len(packets) != 2 || packets[0].Codec != CodecAACADTS || packets[1].Codec != CodecH264 || packets[1].Channel != innerChInter {
+		t.Fatalf("extended retransmission output=%+v", packets)
+	}
+	if got := c.contiguousAckExt(); got != 0x4001 {
+		t.Fatalf("ACK watermark=0x%x, want 0x4001", got)
+	}
+	if got := c.stats.mediaRetransmissions.Load(); got != 2 {
+		t.Fatalf("accepted media retransmissions=%d, want 2", got)
+	}
+}
+
+func TestMalformedRetransmissionChannelsDoNotACK(t *testing.T) {
+	tests := map[string][]byte{
+		"audio without ADTS": makePkt(fragSpec{
+			channel: innerChRetransAudio, b1: 0x01, sub17: 0x01, subWire: 0x4000,
+			totalFrags: 1, fragIdx: 16, paylen: 3, frameNum: 1, payload: []byte{1, 2, 3},
+		}),
+		"empty key data": makePkt(fragSpec{
+			channel: innerChRetransKey, b1: 0x00, subWire: 0x4000,
+			totalFrags: 1, fragIdx: 0, frameNum: 1,
+		}),
+		"unsupported inter family": makePkt(fragSpec{
+			channel: innerChRetransInter, b1: 0x02, subWire: 0x4000,
+			totalFrags: 1, fragIdx: 0, paylen: 3, frameNum: 1, payload: []byte{1, 2, 3},
+		}),
+		"unknown channel": makePkt(fragSpec{
+			channel: 0x09, b1: 0x00, subWire: 0x4000,
+			totalFrags: 1, fragIdx: 0, paylen: 3, frameNum: 1, payload: []byte{1, 2, 3},
+		}),
+		"extended fragment out of range": makeExtendedPkt(extendedFragSpec{
+			b1: 0x08, channel: innerChRetransKey, subFlag: 0,
+			subWire: 0x4000, totalFrags: 1, fragIdx: 1,
+			frameNum: 1, mediaFrameNo: 1, payload: []byte{1, 2, 3},
+		}),
+	}
+	for name, pkt := range tests {
+		t.Run(name, func(t *testing.T) {
+			c := newTestClient(0x4000, "hd")
+			c.parseDatagram(pkt)
+			if got := c.contiguousAckExt(); got != 0x3fff {
+				t.Fatalf("malformed packet advanced ACK watermark to 0x%x", got)
+			}
+			if got := c.stats.mediaRetransmissions.Load(); got != 0 {
+				t.Fatalf("malformed packet counted as %d accepted retransmissions", got)
+			}
+			if len(c.avBuffer) != 0 || len(drainAll(c)) != 0 {
+				t.Fatal("malformed packet reached assembly or output")
+			}
+		})
+	}
+}
+
 func TestExtendedMediaRejectDoesNotACK(t *testing.T) {
 	c := newTestClient(0x4000, "hd")
 
@@ -1011,16 +1218,16 @@ func TestForceDrainReasonCountersAndWindow(t *testing.T) {
 
 func TestForceDrainDoesNotAdvanceACKWatermark(t *testing.T) {
 	c := newTestClient(0x4000, "hd")
-	send := func(subWire uint16, frameNum uint32) {
+	send := func(channel byte, subWire uint16, frameNum uint32) {
 		c.parseDatagram(makePkt(fragSpec{
-			channel: innerChKey, b1: 0x00,
+			channel: channel, b1: 0x00,
 			subWire: subWire, totalFrags: 1, fragIdx: 0,
 			paylen: 8, frameNum: frameNum, payload: dataFragPayload(byte(frameNum), 8),
 		}))
 	}
 
-	send(0x4000, 1)
-	send(0x4002, 2) // leave 0x4001 missing
+	send(innerChKey, 0x4000, 1)
+	send(innerChKey, 0x4002, 2) // leave 0x4001 missing
 	if got := c.contiguousAckExt(); got != 0x4000 {
 		t.Fatalf("ACK watermark after gap=0x%x, want 0x4000", got)
 	}
@@ -1041,8 +1248,9 @@ func TestForceDrainDoesNotAdvanceACKWatermark(t *testing.T) {
 	}
 
 	// A retransmission can close the ACK gap even though the assembler
-	// cursor has already moved past it and will classify it as deferred.
-	send(0x4001, 3)
+	// cursor has already moved past it and will classify it as deferred. Use
+	// AF203's retransmitted-key channel rather than the original channel.
+	send(innerChRetransKey, 0x4001, 3)
 	if got := c.contiguousAckExt(); got != 0x4002 {
 		t.Fatalf("ACK watermark after retransmit=0x%x, want 0x4002", got)
 	}
@@ -1056,9 +1264,12 @@ func TestForceDrainDoesNotAdvanceACKWatermark(t *testing.T) {
 		t.Fatalf("deferredDrop=%d, want 1", got)
 	}
 
-	send(0x4001, 3)
+	send(innerChRetransKey, 0x4001, 3)
 	if got := c.stats.ackDuplicateOrOld.Load(); got != 1 {
 		t.Fatalf("ackDuplicateOrOld=%d, want 1", got)
+	}
+	if got := c.stats.mediaRetransmissions.Load(); got != 2 {
+		t.Fatalf("accepted media retransmissions=%d, want 2", got)
 	}
 }
 

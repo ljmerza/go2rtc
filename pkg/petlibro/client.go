@@ -254,6 +254,7 @@ type counters struct {
 	// sequence counters make it visible when a packet carried a usable AV
 	// sequence but could not be handed to the assembler.
 	normalMediaPackets       atomic.Uint64
+	mediaRetransmissions     atomic.Uint64
 	extendedMediaCandidates  atomic.Uint64
 	extendedMediaParsed      atomic.Uint64
 	extendedMediaRejected    atomic.Uint64
@@ -329,6 +330,7 @@ type countersSnapshot struct {
 	maxMissingFragmentsInFrame uint64
 
 	normalMediaPackets       uint64
+	mediaRetransmissions     uint64
 	extendedMediaCandidates  uint64
 	extendedMediaParsed      uint64
 	extendedMediaRejected    uint64
@@ -403,6 +405,7 @@ func (c *counters) snapshot() countersSnapshot {
 		maxMissingFragmentsInFrame: c.maxMissingFragmentsInFrame.Load(),
 
 		normalMediaPackets:       c.normalMediaPackets.Load(),
+		mediaRetransmissions:     c.mediaRetransmissions.Load(),
 		extendedMediaCandidates:  c.extendedMediaCandidates.Load(),
 		extendedMediaParsed:      c.extendedMediaParsed.Load(),
 		extendedMediaRejected:    c.extendedMediaRejected.Load(),
