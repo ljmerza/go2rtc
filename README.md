@@ -12,13 +12,10 @@ end-to-end. This project is not affiliated with Petlibro or TUTK.
 ## Requirements
 
 - A Petlibro camera that has completed initial provisioning in the Petlibro app
-- The camera's 20-character UID, printed near its QR code
+- The camera's 20-character UID
 - Network access from the go2rtc host to the camera on UDP port `32761`
 - [Go 1.24 or newer](https://go.dev/doc/install) for a source build
 - FFmpeg or ffprobe only if you want command-line stream verification
-
-The phone app is not required during normal LAN streaming. The camera may still
-depend on its vendor cloud connection for firmware-side session authorization.
 
 ## Install from source
 

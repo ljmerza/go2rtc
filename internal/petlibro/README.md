@@ -4,10 +4,6 @@ The Petlibro module registers the `petlibro://` input with go2rtc. The transport
 implementation is a clean-room LAN client for the Kalay/TUTK-family UDP protocol
 used by Petlibro camera feeders on port `32761`.
 
-Runtime streaming does not require a Petlibro account, vendor SDK, or CGO. The
-camera must first be provisioned with the Petlibro app, and its firmware may
-still depend on the vendor cloud connection to authorize LAN sessions.
-
 ## Support status
 
 | Model | Status | Notes |
