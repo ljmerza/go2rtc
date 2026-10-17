@@ -1,0 +1,46 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - petlibro
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go2rtc-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.5
+          cache: true
+
+      - name: Test maintained packages
+        run: |
+          go test ./pkg/petlibro ./cmd/petlibro-resolve -count=1
+          go test ./internal/streams -run '^Test(TimestampContinuity|StreamCorrelationIDs)' -count=1
+          go test ./pkg/rtsp -run '^Test(PacketWriter|PacketWriters|WriteInterleavedData)' -count=1
+
+      - name: Test maintained packages with race detector
+        run: |
+          go test -race ./pkg/petlibro ./cmd/petlibro-resolve -count=1
+          go test -race ./internal/streams -run '^Test(TimestampContinuity|StreamCorrelationIDs)' -count=1
+          go test -race ./pkg/rtsp -run '^Test(PacketWriter|PacketWriters|WriteInterleavedData)' -count=1
+
+      - name: Vet and build
+        run: |
+          go vet ./internal/streams ./pkg/petlibro ./pkg/rtsp ./cmd/petlibro-resolve
+          go build -trimpath -o /tmp/go2rtc .
+          go build -trimpath -o /tmp/petlibro-resolve ./cmd/petlibro-resolve

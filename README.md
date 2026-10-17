@@ -1,9 +1,5 @@
 # Petlibro go2rtc
 
-> This source snapshot is maintained as part of the canonical Petlibro Local
-> backend repository under `addon/go2rtc`. Historical standalone forks
-> are references only; make future Petlibro changes here.
-
 This repository is a fork of [go2rtc](https://github.com/AlexxIT/go2rtc) with a
 clean-room, LAN-only input for Petlibro camera feeders. It connects directly to
 the camera over its Kalay/TUTK-family UDP protocol and exposes the resulting
@@ -26,11 +22,12 @@ depend on its vendor cloud connection for firmware-side session authorization.
 
 ## Install from source
 
-From the root of the Petlibro Local repository:
+Clone this repository and check out a released `v*-petlibro.*` tag or another
+deliberately selected revision. From the repository root:
 
 ```bash
-cd addon/go2rtc
 go build -o go2rtc .
+go build -o petlibro-resolve ./cmd/petlibro-resolve
 ```
 
 Confirm the binary starts:
@@ -109,24 +106,41 @@ Requested audio discovery may use a separate readiness interval.
 
 ## Build
 
-Build the fork directly from this directory:
+Build and test the fork directly from the repository root:
 
 ```bash
 go test ./pkg/petlibro ./cmd/petlibro-resolve
+go test ./internal/streams -run '^Test(TimestampContinuity|StreamCorrelationIDs)'
+go test ./pkg/rtsp -run '^Test(PacketWriter|PacketWriters|WriteInterleavedData)'
 go build -o /tmp/petlibro-go2rtc .
+go build -o /tmp/petlibro-resolve ./cmd/petlibro-resolve
 ```
 
-For a supported container containing both the camera service and PLAF203
-controller, build the repository's [Home Assistant add-on](../README.md) or use
-the root [`docker/`](../../docker/README.md) Compose workflow.
+For the supported container containing both the camera service and PLAF203
+controller, use the
+[Petlibro Local Home Assistant add-on](https://github.com/tannerln7/Petlibro-Home-Assistant).
+
+## Upstream and releases
+
+The maintained `petlibro` branch preserves the upstream go2rtc history and the
+Petlibro camera development history. The original integration was based on
+upstream commit `dc1685e9cf7a8c349181f20a1b4a44825ed394c5`; subsequent upstream
+synchronizations are merged deliberately and documented in their pull
+requests. The Go module path remains `github.com/AlexxIT/go2rtc` to avoid a
+high-risk rewrite of go2rtc's internal imports.
+
+Fork releases use tags such as `v1.9.14-petlibro.1`. They are independent of
+Petlibro Home Assistant add-on releases. Consumers should pin a full commit or
+immutable tag and verify the published checksums rather than tracking the
+`petlibro` branch.
 
 ## Troubleshooting and development
 
-- [Petlibro debugging guide](../../docs/camera-debugging.md) — health counters,
+- [Petlibro debugging guide](docs/debugging.md) — health counters,
   trace controls, plaintext captures, replay, and common failure modes
-- [Development guide](../../docs/camera-development.md) — package architecture, protocol
+- [Development guide](docs/development.md) — package architecture, protocol
   invariants, tests, build checks, and live-test workflow
-- [Contributing](../../CONTRIBUTING.md) — useful issue evidence, privacy rules, and
+- [Contributing](CONTRIBUTING.md) — useful issue evidence, privacy rules, and
   change-submission checklist
 - [Upstream go2rtc documentation](https://github.com/AlexxIT/go2rtc#readme) —
   general output protocols, APIs, transcoding, and integrations
