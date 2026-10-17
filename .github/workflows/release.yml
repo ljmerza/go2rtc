@@ -38,16 +38,48 @@ jobs:
         env:
           CGO_ENABLED: "0"
           GOOS: linux
-          GOARCH: amd64
         run: |
           set -euo pipefail
-          mkdir -p dist/bin
-          go build -trimpath -ldflags="-s -w" -o dist/bin/go2rtc .
-          go build -trimpath -ldflags="-s -w" -o dist/bin/petlibro-resolve ./cmd/petlibro-resolve
-          tar -C dist/bin -czf "dist/go2rtc_${GITHUB_REF_NAME}_linux_amd64.tar.gz" go2rtc petlibro-resolve
+          mkdir -p dist
+
+          # For every supported architecture, publish a standalone static
+          # executable AND a tarball containing go2rtc, petlibro-resolve, and
+          # both MIT license notices. The raw executable names are compatible
+          # with external HA integrations that download and execute them directly.
+          for target in amd64 arm64 armv7; do
+            package_dir="dist/pkg_${target}"
+            mkdir -p "$package_dir"
+            raw_binary="dist/petlibro-go2rtc_linux_${target}"
+
+            if [[ "$target" == armv7 ]]; then
+              GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" \
+                -o "$raw_binary" .
+              GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" \
+                -o "$package_dir/petlibro-resolve" ./cmd/petlibro-resolve
+            else
+              GOARCH="$target" go build -trimpath -ldflags="-s -w" \
+                -o "$raw_binary" .
+              GOARCH="$target" go build -trimpath -ldflags="-s -w" \
+                -o "$package_dir/petlibro-resolve" ./cmd/petlibro-resolve
+            fi
+
+            cp "$raw_binary" "$package_dir/go2rtc"
+            cp LICENSE "$package_dir/LICENSE-go2rtc"
+            cp LICENSE-petlibro-local "$package_dir/LICENSE-petlibro-local"
+            tar -C "$package_dir" -czf \
+              "dist/go2rtc_${GITHUB_REF_NAME}_linux_${target}.tar.gz" \
+              go2rtc petlibro-resolve LICENSE-go2rtc LICENSE-petlibro-local
+          done
+
+          # Keep the checksum-verified source release used by Petlibro builds.
           git archive --format=tar --prefix="go2rtc-${GITHUB_REF_NAME}/" HEAD \
             | gzip -n > "dist/go2rtc_${GITHUB_REF_NAME}_source.tar.gz"
-          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+
+          # Publish licenses separately for consumers of the raw executables.
+          cp LICENSE dist/LICENSE-go2rtc
+          cp LICENSE-petlibro-local dist/LICENSE-petlibro-local
+          (cd dist && sha256sum go2rtc_*.tar.gz petlibro-go2rtc_linux_* LICENSE-* > SHA256SUMS)
+          ./dist/petlibro-go2rtc_linux_amd64 -version
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
@@ -55,4 +87,6 @@ jobs:
           generate_release_notes: true
           files: |
             dist/go2rtc_*.tar.gz
+            dist/petlibro-go2rtc_linux_*
+            dist/LICENSE-*
             dist/SHA256SUMS

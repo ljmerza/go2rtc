@@ -44,3 +44,40 @@ jobs:
           go vet ./internal/streams ./pkg/petlibro ./pkg/rtsp ./cmd/petlibro-resolve
           go build -trimpath -o /tmp/go2rtc .
           go build -trimpath -o /tmp/petlibro-resolve ./cmd/petlibro-resolve
+
+      - name: Cross-build static Linux release binaries (amd64, arm64, armv7)
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+        run: |
+          set -euo pipefail
+          build_dir="$(mktemp -d)"
+          trap 'rm -rf "$build_dir"' EXIT
+
+          # Keep target architectures and build flags aligned with release.yml.
+          for target in amd64 arm64 armv7; do
+            if [[ "$target" == armv7 ]]; then
+              export GOARCH=arm GOARM=7
+            else
+              export GOARCH="$target"
+              unset GOARM
+            fi
+
+            mkdir -p "$build_dir/$target"
+            go build -trimpath -ldflags="-s -w" -o "$build_dir/$target/go2rtc" .
+            go build -trimpath -ldflags="-s -w" -o "$build_dir/$target/petlibro-resolve" ./cmd/petlibro-resolve
+
+            for executable in go2rtc petlibro-resolve; do
+              binary="$build_dir/$target/$executable"
+              test -s "$binary"
+              readelf -h "$binary" >/dev/null
+              if readelf -l "$binary" | grep -q 'INTERP'; then
+                echo "ERROR: $target/$executable has a dynamic program interpreter" >&2
+                exit 1
+              fi
+            done
+            echo "Validated static Linux $target go2rtc and petlibro-resolve builds"
+          done
+
+          "$build_dir/amd64/go2rtc" -version
