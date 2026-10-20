@@ -214,7 +214,7 @@ func openCamera(rawURL string, producerID uint32) (*Camera, error) {
 				log.Info().Str("camera_adapter_id", adapterID).
 					Str("physical_session_id", client.SessionID()).Uint32("producer_id", producerID).
 					Uint16("width", camera.desc.Width).Uint16("height", camera.desc.Height).
-					Msg("petlibro camera stream available")
+					Msg("petlibro camera stream started")
 				return camera, nil
 			}
 			_ = client.Close()
@@ -448,11 +448,7 @@ func (c *Camera) observeVideoConfig(payload []byte) (uint16, uint16, bool) {
 		} else if profile != c.lastProfile || level != c.lastLevel {
 			change = "profile_level"
 		}
-		event := log.Info()
-		if c.preparing {
-			event = log.Debug()
-		}
-		event.Str("camera_adapter_id", c.id).Str("physical_session_id", c.transport.SessionID()).
+		log.Debug().Str("camera_adapter_id", c.id).Str("physical_session_id", c.transport.SessionID()).
 			Str("change", change).Str("codec_config_id", configID).
 			Uint16("width", width).Uint16("height", height).
 			Uint8("profile_idc", profile).Uint8("level_idc", level).
@@ -547,9 +543,9 @@ func (c *Camera) Close() error {
 		c.status.updateHealth(c.transport.healthSnapshot())
 		c.closeErr = c.transport.Close()
 		c.status.markOffline()
-		log.Debug().Str("camera_adapter_id", c.id).Str("physical_session_id", c.transport.SessionID()).
-			Uint32("producer_id", c.producerID).Err(c.closeErr).
-			Dur("uptime", time.Since(c.openedAt)).Msg("petlibro camera adapter closed")
+		log.Info().Str("camera_adapter_id", c.id).Str("physical_session_id", c.transport.SessionID()).
+			Uint32("producer_id", c.producerID).
+			Dur("uptime", time.Since(c.openedAt)).Msg("petlibro camera stream ended")
 	})
 	return c.closeErr
 }

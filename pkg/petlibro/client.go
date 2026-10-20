@@ -617,7 +617,7 @@ func dialTransport(rawURL, quality string, audio bool, correlation cameraCorrela
 	c.established.Store(true)
 	log.Debug().Str("physical_session_id", c.sessionID).
 		Dur("elapsed", time.Since(c.connectedAt)).Msg("petlibro AV bootstrap completed")
-	log.Info().Str("physical_session_id", c.sessionID).
+	log.Debug().Str("physical_session_id", c.sessionID).
 		Str("camera_adapter_id", c.adapterID).Uint32("producer_id", c.producerID).
 		Str("quality", c.quality).Bool("audio", c.audio).
 		Msg("petlibro physical viewing session established")
@@ -764,11 +764,7 @@ func (c *Client) Close() error {
 			_ = c.c2dPlainDump.Close()
 		}
 		c.c2dDumpMu.Unlock()
-		event := log.Debug()
-		if started {
-			event = log.Info()
-		}
-		event.Str("physical_session_id", c.sessionID).
+		log.Debug().Str("physical_session_id", c.sessionID).
 			Str("camera_adapter_id", c.adapterID).Uint32("producer_id", c.producerID).
 			Bool("stop_attempted", stopAttempted).Bool("stop_datagram_written", stopWritten).
 			Dur("uptime", time.Since(c.connectedAt)).

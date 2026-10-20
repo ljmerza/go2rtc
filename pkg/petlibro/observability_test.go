@@ -49,6 +49,31 @@ func TestCameraSPSLogsOnlyMeaningfulConfigurationChangesAtDebug(t *testing.T) {
 	}
 }
 
+func TestCameraInfoLogsOnlyStreamEndLifecycle(t *testing.T) {
+	buffer := capturePetlibroLogs(t, zerolog.InfoLevel)
+	transport := newFakeCameraTransport()
+	camera := newCamera(transport, "hd", false, nil)
+	camera.id = "ca-test"
+	camera.producerID = 42
+
+	low := testAccessUnit(t, "Z2QAFqwa0BQF/yzcBAQFAAADAAEAAAMAHo8UIqA=", true, 100)
+	high := testAccessUnit(t, "R00AKZmgHgCJ+WEAAAMD6AAATiCE", true, 200)
+	_, _, _ = camera.observeVideoConfig(low)
+	_, _, _ = camera.observeVideoConfig(high)
+	if err := camera.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	output := buffer.String()
+	if strings.Count(output, "camera stream ended") != 1 {
+		t.Fatalf("stream-end lifecycle logs are not singular:\n%s", output)
+	}
+	if strings.Contains(output, "H.264 configuration changed") ||
+		strings.Contains(output, "physical viewing session closed") {
+		t.Fatalf("routine stream diagnostics appeared at INFO:\n%s", output)
+	}
+}
+
 func TestPacketTracingLogsMetadataNotPlaintext(t *testing.T) {
 	buffer := capturePetlibroLogs(t, zerolog.TraceLevel)
 	c := &Client{sessionID: "ps-test", verbose: true, tracePackets: true}
